@@ -10,39 +10,54 @@ session_id=${1:-}
 unit="ryoku-qylock-unlock-guard-${session_id}.service"
 who="ryoku-qylock-unlock-${session_id}"
 proof_helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/proof.sh"
-for command in systemctl systemd-run systemd-inhibit jq loginctl busctl; do
+
+# The sleep guard is a systemd transient unit. A box booting another init (Void
+# runs runit + elogind) has no systemd-inhibit, so there is no guard to hold and
+# the unlock goes through the proof and the daemon alone.
+guard=0
+for command in systemctl systemd-run systemd-inhibit; do
+  command -v "$command" >/dev/null 2>&1 || break
+  guard=1
+done
+for command in jq loginctl busctl; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'ryoku-qylock-unlock-prepare: %s is required\n' "$command" >&2
     exit 1
   }
 done
 
-if ! systemctl --user is-active --quiet "$unit"; then
-  systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
-  systemd-run --user --quiet --collect --unit="$unit" \
-    --property=Type=exec --property=TimeoutStopSec=5s \
-    /usr/bin/systemd-inhibit --what=sleep --mode=block \
-    --who="$who" \
-    --why="keep suspend blocked until the compositor lock is released" \
-    /usr/bin/sleep infinity
-fi
+guard_stop() {
+  if (( guard == 1 )); then systemctl --user stop "$unit" >/dev/null 2>&1 || true; fi
+}
 
-guard_ready=0
-for _ in {1..60}; do
-  inhibitors="$(systemd-inhibit --list --json=short 2>/dev/null || true)"
-  if jq -e --arg who "$who" \
-    'any(.[]; .who == $who and .mode == "block"
-      and ((.what | split(":")) | index("sleep")))' \
-    <<<"$inhibitors" >/dev/null 2>&1; then
-    guard_ready=1
-    break
+if (( guard == 1 )); then
+  if ! systemctl --user is-active --quiet "$unit"; then
+    systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
+    systemd-run --user --quiet --collect --unit="$unit" \
+      --property=Type=exec --property=TimeoutStopSec=5s \
+      /usr/bin/systemd-inhibit --what=sleep --mode=block \
+      --who="$who" \
+      --why="keep suspend blocked until the compositor lock is released" \
+      /usr/bin/sleep infinity
   fi
-  sleep 0.05
-done
-if (( guard_ready != 1 )); then
-  systemctl --user stop "$unit" >/dev/null 2>&1 || true
-  printf 'ryoku-qylock-unlock-prepare: durable sleep guard did not become ready\n' >&2
-  exit 1
+
+  guard_ready=0
+  for _ in {1..60}; do
+    inhibitors="$(systemd-inhibit --list --json=short 2>/dev/null || true)"
+    if jq -e --arg who "$who" \
+      'any(.[]; .who == $who and .mode == "block"
+        and ((.what | split(":")) | index("sleep")))' \
+      <<<"$inhibitors" >/dev/null 2>&1; then
+      guard_ready=1
+      break
+    fi
+    sleep 0.05
+  done
+  if (( guard_ready != 1 )); then
+    guard_stop
+    printf 'ryoku-qylock-unlock-prepare: durable sleep guard did not become ready\n' >&2
+    exit 1
+  fi
 fi
 
 unlockable() {
@@ -55,7 +70,7 @@ unlockable() {
 }
 
 if ! unlockable; then
-  systemctl --user stop "$unit" >/dev/null 2>&1 || true
+  guard_stop
   printf 'ryoku-qylock-unlock-prepare: session is not safely unlockable\n' >&2
   exit 1
 fi
@@ -66,7 +81,7 @@ fi
 if ! unlockable ||
    [[ ! -x $proof_helper ]] ||
    ! "$proof_helper" clear "${QYLOCK_PROOF_TOKEN:-}" "$session_id"; then
-  systemctl --user stop "$unit" >/dev/null 2>&1 || true
+  guard_stop
   printf 'ryoku-qylock-unlock-prepare: session is not safely unlockable\n' >&2
   exit 1
 fi
