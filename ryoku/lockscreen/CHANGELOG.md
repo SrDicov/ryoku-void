@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Fixed
+- **The lock can be unlocked on a box without systemd.** The unlock guard
+  required `systemctl`, `systemd-run` and `systemd-inhibit` and exited 1
+  without them, so on a runit/elogind host the lock screen could never be
+  released. It now skips only the sleep-block guard when that tooling is
+  missing and still enforces the unlockable-session check and the proof.
+
 ### Changed
 - **The login pointer is visible again.** On a hybrid laptop whose panel is on
   the iGPU, the greeter still forced weston's Pixman renderer -- a workaround

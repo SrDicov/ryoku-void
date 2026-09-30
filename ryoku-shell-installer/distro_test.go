@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,7 +18,7 @@ func TestDetectDistro(t *testing.T) {
 		{"ubuntu", "debian", "debian"},
 		{"linuxmint", "ubuntu debian", "debian"},
 		{"fedora", "", ""},
-		{"void", "", ""},
+		{"void", "", "void"},
 	} {
 		d := detectDistro(c.id, c.like)
 		got := ""
@@ -39,6 +40,29 @@ func TestLocalAllRenamesAndDrops(t *testing.T) {
 	}
 	if archLinux.local("networkmanager") != "networkmanager" {
 		t.Error("arch must pass base.packages names through unchanged")
+	}
+	// Spot-checks against the Void repodata index; the full map is docs/void.md.
+	for _, c := range []struct{ arch, void string }{
+		{"networkmanager", "NetworkManager"},
+		{"fish", "fish-shell"},
+		{"bluez-utils", "bluez"},
+		{"vulkan-icd-loader", "vulkan-loader"},
+		{"xorg-xwayland", "xorg-server-xwayland"},
+		{"qt6-5compat", "qt6-qt5compat"},
+		{"qemu-desktop", "qemu"},
+		{"tesseract-data-eng", "tesseract-ocr-eng"},
+		{"xpadneo-dkms", "xpadneo"},
+		{"imagemagick", "ImageMagick"},
+		{"mangohud", "MangoHud"},
+		{"hypridle", ""},
+		{"blesh", ""},
+		{"vimix-cursors", "bibata-cursor-theme"},
+		{"ttf-material-symbols-variable", "not-st"},
+		{"npm", ""},
+	} {
+		if got := voidLinux.local(c.arch); got != c.void {
+			t.Errorf("void local(%q) = %q, want %q", c.arch, got, c.void)
+		}
 	}
 }
 
@@ -64,6 +88,33 @@ func TestStepsPerDistro(t *testing.T) {
 	wantDeb := "sysupgrade tools payload backup conflicts packages build session configs shell doctor verify"
 	if deb != wantDeb {
 		t.Errorf("debian steps = %q, want %q", deb, wantDeb)
+	}
+
+	// Void builds from source exactly like Debian: no [ryoku] repo, no AUR,
+	// no pacman-only driver step. It keeps the z-repo trust step, which Debian
+	// has no equivalent for.
+	voi := strings.Join(ids(&facts{distro: voidLinux}), " ")
+	wantVoid := "sysupgrade zrepo tools payload backup conflicts packages build session configs shell doctor verify"
+	if voi != wantVoid {
+		t.Errorf("void steps = %q, want %q", voi, wantVoid)
+	}
+}
+
+// A box can only run the window managers it has installed: Void packages niri
+// but not hyprland, so the default pick has to follow what is on PATH or the
+// install lands on a compositor with no binary.
+func TestAvailableCompositorsFollowsPATH(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	if got := availableCompositors(); len(got) != len(compositors()) {
+		t.Errorf("with no compositor installed, got %v, want all of %v", got, compositors())
+	}
+	if err := os.WriteFile(filepath.Join(dir, "niri"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := availableCompositors()
+	if len(got) != 1 || got[0] != "niri" {
+		t.Errorf("with only niri installed, got %v, want [niri]", got)
 	}
 }
 

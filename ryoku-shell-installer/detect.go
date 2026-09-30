@@ -210,6 +210,16 @@ func detect() *facts {
 		activeDistro = d
 		f.distro = d
 	}
+	// RYOKU_FORCE_DISTRO overrides the whole detection, so the step list, the
+	// package manager and the init wiring are all exercised for a distro that
+	// is not the one this machine boots. The only way to check the void lane
+	// from a runner that is not Void.
+	if id := strings.TrimSpace(os.Getenv("RYOKU_FORCE_DISTRO")); id != "" {
+		if d := detectDistro(id, ""); d != nil {
+			f.distroID, f.distroLike, f.distro = id, "", d
+			activeDistro = d
+		}
+	}
 
 	u, err := user.Current()
 	if err == nil {
@@ -239,9 +249,16 @@ func detect() *facts {
 	f.detectSecureBoot()
 
 	// enabled display manager: the display-manager.service alias symlink is
-	// authoritative; fall back to probing the known units.
+	// authoritative on systemd; on runit the /var/service links are.
 	if tgt, err := os.Readlink("/etc/systemd/system/display-manager.service"); err == nil {
 		f.currentDM = filepath.Base(tgt)
+	} else if initSystem() == "runit" {
+		for _, dm := range append([]string{"sddm.service"}, otherDMUnits...) {
+			if _, err := os.Lstat("/var/service/" + runitName(dm)); err == nil {
+				f.currentDM = dm
+				break
+			}
+		}
 	} else {
 		for _, dm := range append([]string{"sddm.service"}, otherDMUnits...) {
 			if unitEnabled("system", dm) {
@@ -251,9 +268,9 @@ func detect() *facts {
 		}
 	}
 
-	f.nmEnabled = unitEnabled("system", "NetworkManager.service")
+	f.nmEnabled = sysEnabled("NetworkManager.service")
 	for _, n := range otherNetUnits {
-		if unitEnabled("system", n) {
+		if sysEnabled(n) {
 			f.otherNet = append(f.otherNet, n)
 		}
 	}
@@ -265,17 +282,20 @@ func detect() *facts {
 		}
 	}
 
-	if f.pacman {
+	if f.pacman || (f.distro != nil && f.distro.id == "void") {
 		for _, p := range rivalShellPkgs {
 			if pacmanHas(p) {
 				f.rivalPkgs = append(f.rivalPkgs, p)
 			}
 		}
 		// end-4's meta packages pull the whole illogical-impulse daemon zoo;
-		// plain -R removal, same reasoning as the noctalia metas.
-		for _, p := range strings.Fields(out("pacman", "-Qq")) {
-			if strings.HasPrefix(p, "illogical-impulse-") {
-				f.rivalPkgs = append(f.rivalPkgs, p)
+		// plain -R removal, same reasoning as the noctalia metas. Arch only:
+		// the query below is pacman-specific.
+		if f.pacman {
+			for _, p := range strings.Fields(out("pacman", "-Qq")) {
+				if strings.HasPrefix(p, "illogical-impulse-") {
+					f.rivalPkgs = append(f.rivalPkgs, p)
+				}
 			}
 		}
 		for _, p := range conflictBlockerPkgs {
@@ -307,6 +327,13 @@ func detect() *facts {
 	f.omarchyGuards = findOmarchyGuards()
 
 	for _, unit := range softConflictUnits {
+		if initSystem() == "runit" {
+			// runit user services are links under ~/runit; presence is the probe.
+			if _, err := os.Lstat(filepath.Join(f.homeDir, "runit", runitName(unit))); err == nil {
+				f.softUnits = append(f.softUnits, unit)
+			}
+			continue
+		}
 		if unitEnabled("user", unit) {
 			f.softUnits = append(f.softUnits, unit)
 		}

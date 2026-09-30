@@ -114,7 +114,7 @@ func isRyokuArchTree(p string) bool {
 		return false
 	}
 	url, err := sys.RunOut("git", "-C", p, "remote", "get-url", "origin")
-	return err == nil && strings.Contains(url, "ryoku-arch")
+	return err == nil && (strings.Contains(url, "ryoku-arch") || strings.Contains(url, "ryoku-void"))
 }
 
 // desymlinkStateDir turns a symlinked state dir into a real one, migrating the

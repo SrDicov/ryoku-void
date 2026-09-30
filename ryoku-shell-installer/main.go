@@ -772,8 +772,8 @@ func main() {
 	yes := flag.Bool("yes", false, i18n.T("run non-interactively with the default plan"))
 	dry := flag.Bool("dry-run", false, i18n.T("print every command instead of running it"))
 	uninstall := flag.Bool("uninstall", false, i18n.T("remove the ryoku packages and restore the backup chain"))
-	ref := flag.String("ref", envOr("RYOKU_SHELL_REF", "main"), i18n.T("ryoku-arch git ref for the payload"))
-	payload := flag.String("payload", os.Getenv("RYOKU_SHELL_PAYLOAD"), i18n.T("use a local ryoku-arch checkout as the payload"))
+	ref := flag.String("ref", envOr("RYOKU_SHELL_REF", "main"), i18n.T("ryoku git ref for the payload"))
+	payload := flag.String("payload", os.Getenv("RYOKU_SHELL_PAYLOAD"), i18n.T("use a local ryoku checkout as the payload"))
 	compositor := flag.String("compositor", "", i18n.T("window manager to install: hyprland or niri (default hyprland)"))
 	flag.Parse()
 
@@ -783,16 +783,21 @@ func main() {
 	if os.Geteuid() == 0 {
 		die(i18n.T("run as your normal user, not root; sudo is used where needed"))
 	}
-	if detectHostDistro() == nil {
-		die(i18n.T("unsupported distribution: Ryoku installs on Arch-based and Debian-based systems"))
+	if d := detectHostDistro(); d == nil {
+		die(i18n.T("unsupported distribution: Ryoku installs on Arch-based, Void and Debian-based systems"))
 	}
 	if out("uname", "-m") != "x86_64" {
 		die(i18n.T("Ryoku ships x86_64 builds only"))
 	}
-	// the whole engine leans on systemctl; Artix and other non-systemd spins
-	// pass the pacman check but every session/service step would fail.
-	if !systemdBooted() {
-		die(i18n.T("this system does not boot with systemd (Artix or another init detected); Ryoku needs systemd and cannot install here"))
+	// the engine drives services through the init abstraction (systemd on
+	// Arch, runit on Void); boxes booting neither cannot be converted. a dry
+	// run is a preview of the plan, so it is allowed to describe one anyway.
+	switch initSystem() {
+	case "systemd", "runit":
+	default:
+		if !*dry {
+			die(i18n.T("this system boots with neither systemd nor runit; Ryoku needs one of them and cannot install here"))
+		}
 	}
 
 	if !*dry {
@@ -814,7 +819,11 @@ func main() {
 		die(err.Error())
 	}
 	if m, ok := fm.(model); ok && m.exitReboot {
-		_ = exec.Command("systemctl", "reboot").Run()
+		if initSystem() == "runit" {
+			_ = exec.Command("sudo", "shutdown", "-r", "now").Run()
+		} else {
+			_ = exec.Command("systemctl", "reboot").Run()
+		}
 	}
 }
 
@@ -838,7 +847,6 @@ func chooseCompositor(choice string) string {
 	die(i18n.Tf("unknown compositor %q; choose one of: %s", choice, strings.Join(compositors(), ", ")))
 	return ""
 }
-
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v

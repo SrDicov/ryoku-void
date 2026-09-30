@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+- **The update channel tracks this fork.** `ryoku track`, `ryoku recovery` and
+  the update channel's repository slug point at `SrDicov/ryoku-void`, and a
+  checkout whose origin is the fork is accepted where the upstream slug used to
+  be required.
+
 ### Added
 - **`ryoku doctor` names the reverse-PRIME first-commit hazard.** On a laptop
   whose connected panel is driven by the iGPU while the render pin puts NVIDIA

@@ -43,7 +43,7 @@ func ResolveRepo() string {
 	}
 	track := filepath.Join(Home(), "ryoku-arch")
 	if _, err := RunOut("git", "-C", track, "rev-parse", "--git-dir"); err == nil {
-		if url, e := RunOut("git", "-C", track, "remote", "get-url", "origin"); e == nil && strings.Contains(url, "ryoku-arch") {
+		if url, e := RunOut("git", "-C", track, "remote", "get-url", "origin"); e == nil && (strings.Contains(url, "ryoku-arch") || strings.Contains(url, "ryoku-void")) {
 			return track
 		}
 	}
