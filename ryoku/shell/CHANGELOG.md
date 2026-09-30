@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### New
+- **The shell's daemons run under runit as well as systemd.** `deploy.sh`
+  detects the init and lays `~/runit` services for `ryoku-shell`, `ryoku-idle`,
+  `ryoku-clamshell`, `ryogami`, `ryoku-rashin` and the equalizer on a runit box
+  (a Void machine), through one small init abstraction; Arch keeps its systemd
+  user units unchanged. `runsvdir ~/runit &` in the shell profile is all a user
+  adds. The runit shell service carries the qylock activate/prepare-stop pair
+  the unit does in ExecStartPre/ExecStop, the logind drop-in goes to elogind's
+  directory, the session daemons are cycled with `sv`, and the live cutover
+  skips the transient sleep-block guard, which has no runit form.
+
 ### Fixed
 - **The picker's Matugen App Templates toggles respond again.** The row wrote
   through `ryoku-hub hypr matugen set`, a command path that no longer exists:
