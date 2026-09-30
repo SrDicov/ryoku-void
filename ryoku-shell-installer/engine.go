@@ -26,7 +26,7 @@ import (
 // line-anchored so a commented-out "#[ryoku]" stanza does not count.
 var ryokuStanzaRe = regexp.MustCompile(`(?m)^\[ryoku\]`)
 
-const repoURL = "https://github.com/ryoku-dev/ryoku-arch.git"
+const repoURL = "https://github.com/SrDicov/ryoku-void.git"
 
 const pacmanStanza = `
 [ryoku]
@@ -120,7 +120,7 @@ func defaultPlan(f *facts) *plan {
 		// look; keep it unless they opt in.
 		greeter:    !f.kdeSddmConf,
 		resume:     f.prevRun != nil,
-		compositor: compositors()[0],
+		compositor: availableCompositors()[0],
 		// the AZERTY overrides are opt-in only; a salvaged layout already
 		// covers anyone who had one configured.
 	}
@@ -131,6 +131,29 @@ func defaultPlan(f *facts) *plan {
 // verify and package steps read plan.compositor, so a pick flows end to end.
 func compositors() []string {
 	return wm.Providers()
+}
+
+// wmBinary maps a provider to the compositor executable it drives, which is how
+// a box answers "is this window manager actually here?". Void packages niri but
+// not hyprland, so the pick follows what the machine can run.
+var wmBinary = map[string]string{"hyprland": "hyprland", "niri": "niri"}
+
+// availableCompositors drops the providers whose compositor is not installed,
+// so the default pick and the offered list are ones the box can actually run.
+// Never returns empty: the first provider always stays as the hand-build option.
+func availableCompositors() []string {
+	all := compositors()
+	var ok []string
+	for _, c := range all {
+		if bin, known := wmBinary[c]; known && !has(bin) {
+			continue
+		}
+		ok = append(ok, c)
+	}
+	if len(ok) == 0 {
+		return all
+	}
+	return ok
 }
 
 // monitorPinFile is the hand-pinned display file for a compositor, relative to
@@ -223,6 +246,7 @@ func newEngine(f *facts, p *plan, dry bool, ref, payloadOverride string) *engine
 	all := []estep{
 		{"legacy", i18n.T("Retiring the previous distro's package sources"), stepLegacy},
 		{"sysupgrade", i18n.T("Updating the system"), stepSysupgrade},
+		{"zrepo", i18n.T("Trusting the z-repo package repository"), stepZRepo},
 		{"tools", i18n.T("Installing installer tools (git, build tools)"), stepTools},
 		{"payload", i18n.T("Fetching the Ryoku payload"), stepPayload},
 		{"backup", i18n.T("Backing up your configs"), stepBackup},
@@ -243,7 +267,11 @@ func newEngine(f *facts, p *plan, dry bool, ref, payloadOverride string) *engine
 		if src && pacmanOnly[s.id] {
 			continue
 		}
-		if !src && s.id == "build" {
+		// z-repo is Void's third-party repo; no other distro carries one.
+		if s.id == "zrepo" && (f.distro == nil || f.distro.zrepoURL == "") {
+			continue
+		}
+		if !src && (s.id == "build" || s.id == "zrepo") {
 			continue
 		}
 		e.steps = append(e.steps, s)
@@ -538,11 +566,45 @@ func stepTools(e *engine) error {
 	return e.sudo(d.installArgs([]string{"git", d.local("base-devel")})...)
 }
 
+// stepZRepo trusts the Z Linux binary repository on Void: the signed XBPS repo
+// that carries what Void's official repos do not (verified against its stable
+// repodata). Written as a plain /etc/xbps.d file, so the next sync picks it up;
+// xbps imports the RSA key from the signed index-meta into
+// /var/db/xbps/keys on that first sync, which is what makes the packages below
+// verify. No-op off Void.
+func stepZRepo(e *engine) error {
+	d := e.d()
+	if d.zrepoURL == "" {
+		return nil
+	}
+	path := "/etc/xbps.d/20-ryoku-void.conf"
+	if !e.dry {
+		if err := e.sudo("mkdir", "-p", "/etc/xbps.d"); err != nil {
+			return err
+		}
+	}
+	if err := e.sudoWrite(path, "repository="+d.zrepoURL+"\n"); err != nil {
+		return err
+	}
+	e.recordRestore("sudo rm -f " + path)
+	e.say(i18n.Tf("z-repo enabled (%s); its signing key is imported on the next sync", d.zrepoURL))
+	if e.dry {
+		return nil
+	}
+	// the sync is what fetches the index and stores the key. a failure here
+	// leaves the file in place, so the package step below still finds whatever
+	// z-repo can serve; the official repos are unaffected either way.
+	if err := e.sudo(d.refreshCmd...); err != nil {
+		e.say(i18n.T("warning: could not sync z-repo yet; its packages may be missing from this run (continuing)"))
+	}
+	return nil
+}
+
 func stepPayload(e *engine) error {
 	if e.payloadOverride != "" {
 		e.payload = e.payloadOverride
 		if _, err := os.Stat(filepath.Join(e.payload, "ryoku/lockscreen/install-qylock")); err != nil && !e.dry {
-			return errors.New(i18n.Tf("payload override %s does not look like a ryoku-arch checkout", e.payload))
+			return errors.New(i18n.Tf("payload override %s does not look like a ryoku checkout", e.payload))
 		}
 		e.say(i18n.Tf("using payload checkout %s", e.payload))
 		return nil
@@ -715,12 +777,7 @@ func stepConflicts(e *engine) error {
 	// stop: running daemons die with the old session.
 	if e.p.softOff {
 		for _, u := range e.f.softUnits {
-			if err := e.cmd("", nil, "systemctl", "--user", "disable", u); err != nil {
-				e.say(i18n.Tf("warning: could not disable %s", u))
-				continue
-			}
-			// || true: add-wants units have no [Install] and refuse a bare enable
-			e.recordRestore("systemctl --user enable " + u + " || true")
+			e.softOffUser(u)
 		}
 	}
 	if e.p.rivals && len(e.f.rivalPkgs) > 0 {
@@ -744,11 +801,21 @@ func stepConflicts(e *engine) error {
 		// whole desktop transaction. -Rdd drops the framework alone; its plugins
 		// re-resolve against ryoku-oh-my-zsh's provides in the install step.
 		e.say(i18n.Tf("replacing %s with the Ryoku zsh framework", strings.Join(e.f.zshFrameworkPkgs, " ")))
-		if err := e.sudo(append([]string{"pacman", "-Rdd", "--noconfirm"}, e.f.zshFrameworkPkgs...)...); err != nil {
+		// -Rdd is pacman-specific (drop the framework alone so its plugins
+		// re-resolve); every other manager gets a plain removal.
+		rmArgs := e.d().removeArgs(e.f.zshFrameworkPkgs)
+		if e.d().id == "arch" {
+			rmArgs = append([]string{"pacman", "-Rdd", "--noconfirm"}, e.f.zshFrameworkPkgs...)
+		}
+		if err := e.sudo(rmArgs...); err != nil {
 			e.say(i18n.Tf("warning: could not remove %s; the package step may abort on a dependency conflict", strings.Join(e.f.zshFrameworkPkgs, " ")))
 		} else {
 			for _, p := range e.f.zshFrameworkPkgs {
-				e.recordRestore("sudo pacman -S --asdeps " + p)
+				if e.d().id == "arch" {
+					e.recordRestore("sudo pacman -S --asdeps " + p)
+				} else {
+					e.recordRestore("sudo " + strings.Join(e.d().installCmd, " ") + " " + p)
+				}
 			}
 		}
 	}
@@ -898,7 +965,21 @@ func stepPackages(e *engine) error {
 	}
 	// -Syu, not -S: a resumed run holds the db its first attempt synced, and
 	// a publish in between replaces or prunes the files that db points at.
-	return e.sudo(desktopPacmanArgs(d, pkgs)...)
+	if err := e.sudo(desktopPacmanArgs(d, pkgs)...); err != nil {
+		return err
+	}
+	// z-repo extras last and one at a time: a name the repo has dropped (or a
+	// box that never synced it) must not take the desktop transaction with it.
+	// This is the same best-effort lane the AUR extras use on Arch.
+	for _, p := range d.zrepoExtras {
+		if d.installedPkg(p) {
+			continue
+		}
+		if err := e.sudo(d.installArgs([]string{p})...); err != nil {
+			e.say(i18n.Tf("warning: z-repo could not install %s (continuing)", p))
+		}
+	}
+	return nil
 }
 
 // desktopPacmanArgs builds the package transaction for stepPackages. On Arch it
@@ -1034,12 +1115,16 @@ func stepSession(e *engine) error {
 		if dm := e.f.otherDM(); dm != "" {
 			// disable, never mask or uninstall: reversible, and the running
 			// greeter session is untouched until reboot.
-			if err := e.sudo("systemctl", "disable", dm); err != nil {
+			if err := e.svcDisable(dm); err != nil {
 				return err
 			}
-			e.recordRestore("sudo systemctl disable sddm.service && sudo systemctl enable " + dm)
+			e.recordRestore(svcDisableLine("sddm.service") + " && " + svcEnableLine(dm))
 		} else if e.f.currentDM == "" {
-			e.recordRestore("sudo systemctl disable sddm.service && sudo systemctl set-default multi-user.target")
+			undo := svcDisableLine("sddm.service")
+			if initSystem() != "runit" {
+				undo += " && sudo systemctl set-default multi-user.target"
+			}
+			e.recordRestore(undo)
 		}
 		if err := e.cmd("", nil, "bash", filepath.Join(e.payload, "ryoku/lockscreen/sddm/setup")); err != nil {
 			return err
@@ -1111,17 +1196,17 @@ fi`); err != nil {
 
 	if e.p.switchNet {
 		for _, n := range e.f.otherNet {
-			if err := e.sudo("systemctl", "disable", n); err != nil {
+			if err := e.svcDisable(n); err != nil {
 				e.say(i18n.Tf("warning: could not disable %s", n))
 				continue
 			}
-			e.recordRestore("sudo systemctl enable " + n)
+			e.recordRestore(svcEnableLine(n))
 		}
 		if !e.f.nmEnabled {
-			if err := e.sudo("systemctl", "enable", "NetworkManager.service"); err != nil {
+			if err := e.svcEnable("NetworkManager.service"); err != nil {
 				return err
 			}
-			e.recordRestore("sudo systemctl disable NetworkManager.service")
+			e.recordRestore(svcDisableLine("NetworkManager.service"))
 		}
 		// iwd backend pin, Ryoku network policy. takes effect at the next NM
 		// restart (reboot), so the live wifi connection is never dropped.
@@ -1305,7 +1390,7 @@ EOF`); err != nil {
 		}
 		e.say(i18n.Tf("seeded ~/%s", s.dst))
 	}
-	return e.cmd("", nil, "systemctl", "--user", "daemon-reload")
+	return e.userDaemonReload()
 }
 
 func stepAUR(e *engine) error {
@@ -1382,7 +1467,7 @@ func stepDoctor(e *engine) error {
 
 func stepVerify(e *engine) error {
 	if e.dry {
-		e.say(i18n.T("DRYRUN: verify [ryoku] repo, packages, session files"))
+		e.say(i18n.T("DRYRUN: verify the installed desktop, session files and services"))
 		return nil
 	}
 	var bad []string
@@ -1417,7 +1502,7 @@ func stepVerify(e *engine) error {
 	// without a live compositor (state would falsely fail here).
 	check(e.providerAnswers(), i18n.T("window-manager provider responds"))
 	if e.p.switchDM {
-		check(unitEnabled("system", "sddm.service"), i18n.T("sddm.service enabled"))
+		check(sysEnabled("sddm.service"), i18n.T("sddm login manager enabled"))
 	}
 	if e.p.switchDM && e.p.greeter {
 		if theme := effectiveSDDMTheme(); theme != "" && theme != "ryoku" {
@@ -1427,6 +1512,10 @@ func stepVerify(e *engine) error {
 	if e.f.hasNvidia && e.f.secureBoot && !e.p.nvidia {
 		e.say(gWarn + " " + i18n.T("Secure Boot is on, so the proprietary NVIDIA driver was skipped: unsigned DKMS modules are rejected at boot."))
 		e.say(i18n.T("To switch later, disable Secure Boot in firmware or sign the kernel and modules (sbctl), then re-run this installer."))
+	}
+	if e.f.hasNvidia && e.d().id == "void" {
+		e.say(gWarn + " " + i18n.T("the vendor driver scripts in this repo are Arch (pacman) only, so NVIDIA was not set up here."))
+		e.say(i18n.T("On Void it comes from the nonfree repository: enable void-repo-nonfree, then install the nvidia package."))
 	}
 	// matugen is a hard ryoku-desktop depend on Arch, so a miss means the desktop
 	// set install is broken. Debian does not package it: warn instead of failing.

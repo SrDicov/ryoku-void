@@ -2,11 +2,14 @@
 
 Install the Ryoku desktop on an existing machine, without the ISO.
 
-Arch-based hosts get the signed `[ryoku]` packages. Debian-based hosts have no
-`[ryoku]` repository, so the desktop is built from the cloned payload with
-`ryoku/shell/deploy.sh`: dependencies come from apt, and the Go programs, QML
-modules and `Ryoku.Blobs` are compiled locally. The Hyprland compositor plugins
-need `makepkg` and are skipped there; the shell degrades to them being off.
+Arch-based hosts get the signed `[ryoku]` packages. Debian-based and Void
+hosts have no `[ryoku]` repository, so the desktop is built from the cloned
+payload with `ryoku/shell/deploy.sh`: dependencies come from apt (Debian) or
+xbps (Void), and the Go programs, QML modules and `Ryoku.Blobs` are compiled
+locally. The Hyprland compositor plugins need `makepkg` and are skipped there;
+the shell degrades to them being off. Void has no Hyprland stack in its
+official repositories at all, so Void installs are niri-first; see
+`docs/void.md` for the package/service map and the Hyprland hand-build list.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryoku-dev/ryoku/main/ryoku-shell-installer/install.sh | bash
@@ -33,7 +36,8 @@ ryoku-shell-install --uninstall        # or: ... | bash -s -- --uninstall
 ## What it does
 
 `install.sh` is a dumb bootstrap: it verifies the machine is a supported
-x86_64 family (pacman or apt-get), downloads the prebuilt `ryoku-shell-install`
+x86_64 family (pacman, xbps-install or apt-get) booting a supported init
+(systemd or runit), downloads the prebuilt `ryoku-shell-install`
 binary (checksummed) from this directory, and hands it the real terminal.
 Everything else is the binary, a bubbletea TUI sharing the ISO installer's
 visual language:

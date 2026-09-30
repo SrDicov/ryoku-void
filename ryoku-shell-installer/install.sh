@@ -4,7 +4,7 @@
 # on an existing Arch machine. Kept deliberately dumb: every real decision
 # lives in the ryoku-shell-install binary this script downloads.
 #
-#   curl -fsSL https://raw.githubusercontent.com/ryoku-dev/ryoku-arch/main/ryoku-shell-installer/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/SrDicov/ryoku-void/main/ryoku-shell-installer/install.sh | bash
 #
 # args after `bash -s --` are forwarded to the installer (--yes, --dry-run).
 # RYOKU_SHELL_REF picks the git ref to fetch the installer and payload from.
@@ -12,7 +12,7 @@ set -euo pipefail
 
 main() {
   local ref="${RYOKU_SHELL_REF:-main}"
-  local raw="https://raw.githubusercontent.com/ryoku-dev/ryoku-arch/${ref}/ryoku-shell-installer"
+  local raw="https://raw.githubusercontent.com/SrDicov/ryoku-void/${ref}/ryoku-shell-installer"
 
   # English on purpose: this bootstrap runs before any Ryoku catalog exists on
   # the box to translate from; the ryoku-shell-install binary it fetches does that.
@@ -31,15 +31,17 @@ main() {
   local ryoku_family
   if command -v pacman > /dev/null 2>&1; then
     ryoku_family=arch
+  elif command -v xbps-install > /dev/null 2>&1; then
+    ryoku_family=void
   elif command -v apt-get > /dev/null 2>&1; then
     ryoku_family=debian
   else
-    die "unsupported distribution: Ryoku installs on Arch-based and Debian-based systems"
+    die "unsupported distribution: Ryoku installs on Arch-based, Void and Debian-based systems"
   fi
   [[ $(uname -m) == x86_64 ]] || die "Ryoku ships x86_64 builds only"
-  # the binary refuses non-systemd boots much later (session + services are
-  # systemd units); saying it here spares Artix users the download.
-  [[ -d /run/systemd/system ]] || die "this installer needs systemd (Artix and other non-systemd inits are not supported)"
+  # the binary drives services through the init abstraction (systemd or
+  # runit); saying it here spares unsupported inits the download.
+  [[ -d /run/systemd/system || -d /run/runit/runsvdir.current || -d /var/service ]] || die "this installer needs systemd or runit (other inits are not supported)"
   command -v curl > /dev/null 2>&1 || die "curl is required"
 
   # warn-only on derivatives: the package manager is what actually matters.
@@ -47,12 +49,15 @@ main() {
     # shellcheck source=/dev/null
     . /etc/os-release
     case "${ID:-} ${ID_LIKE:-}" in
-      *arch*|*debian*) ;;
+      *arch*|*debian*|*void*) ;;
       *) say "warning: ${PRETTY_NAME:-unknown distro} is not recognised; continuing as ${ryoku_family}" ;;
     esac
   fi
   if [[ $ryoku_family == debian ]]; then
     say "Debian detected: the desktop is built from source, which takes a few minutes"
+  fi
+  if [[ $ryoku_family == void ]]; then
+    say "Void detected: the desktop is built from source (niri first; Hyprland is a hand-build, see docs/void.md), which takes a few minutes"
   fi
 
   local work

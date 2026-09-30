@@ -23,6 +23,13 @@ type distro struct {
 	// exist here and is skipped.
 	rename map[string]string
 
+	// z-repo (Void only): the third-party signed repository and the best-effort
+	// extras it serves after the base set. Empty on every other distro.
+	zrepoURL     string
+	zrepoKeyURL  string
+	zrepoKeyName string
+	zrepoExtras  []string
+
 	// build are the extra packages a fromSource install needs to compile the
 	// Go programs, the Ryoku.Blobs QML plugin, and the Hyprland plugins.
 	build []string
@@ -113,10 +120,87 @@ var debianLinux = &distro{
 // detection paths that have no engine to hand.
 var activeDistro = archLinux
 
+// Package names verified against the Void repodata index (x86_64,
+// 2026-09-30; 14790 packages). Void ships no Hyprland stack at all
+// (hyprland, hypridle and xdg-desktop-portal-hyprland are all absent), so a
+// Void install is niri-first and Hyprland is a hand-build; see docs/void.md.
+var voidLinux = &distro{
+	id:         "void",
+	name:       "Void",
+	fromSource: true,
+	installCmd: []string{"xbps-install", "-S", "-y"},
+	removeCmd:  []string{"xbps-remove", "-y"},
+	updateCmd:  []string{"xbps-install", "-Suy"},
+	refreshCmd: []string{"xbps-install", "-S"},
+	queryCmd:   []string{"xbps-query"},
+	// zrepo is the Z Linux binary repository (signed XBPS, glibc x86_64): the
+	// source for every package Void's official repos do not carry.
+	zrepoURL:     "https://github.com/SrDicov/z-repo/releases/download/stable",
+	zrepoKeyURL:  "https://raw.githubusercontent.com/SrDicov/z-repo/master/keys/zlinux-repo.pub",
+	zrepoKeyName: "zlinux-repo",
+	zrepoExtras:  []string{"zen-browser-bin"},
+	build: []string{
+		"base-devel", "go", "cmake", "ninja", "pkg-config",
+		"qt6-base-devel", "qt6-declarative-devel", "qt6-multimedia-devel",
+		"qt6-svg-devel", "qt6-wayland-devel", "qt6-shadertools-devel",
+		"qt6-qt5compat-devel", "wayland-devel", "vulkan-loader-devel",
+		"libdrm-devel", "elogind-devel",
+	},
+	rename: map[string]string{
+		"base":                    "",
+		"bluez-utils":             "bluez",
+		"fish":                    "fish-shell",
+		"gst-plugins-bad":         "gst-plugins-bad1",
+		"gst-plugins-base":        "gst-plugins-base1",
+		"gst-plugins-good":        "gst-plugins-good1",
+		"gst-plugins-ugly":        "gst-plugins-ugly1",
+		"imagemagick":             "ImageMagick",
+		"inter-font":              "font-inter",
+		"mangohud":                "MangoHud",
+		"networkmanager":          "NetworkManager",
+		"noto-fonts":              "noto-fonts-ttf",
+		"pipewire-alsa":           "alsa-pipewire",
+		"pipewire-audio":          "",
+		"pipewire-pulse":          "",
+		"python":                  "python3",
+		"python-pip":              "python3-pip",
+		"python-pipx":             "python3-pipx",
+		"npm":                     "",
+		"qemu-desktop":            "qemu",
+		"qt6-5compat":             "qt6-qt5compat",
+		"qt6-multimedia-ffmpeg":   "qt6-multimedia",
+		"tesseract-data-eng":      "tesseract-ocr-eng",
+		"ttf-firacode-nerd":       "",
+		"ttf-hack-nerd":           "",
+		"ttf-jetbrains-mono-nerd": "nerd-fonts-ttf",
+		// from z-repo (verified against its stable repodata, 80 packages)
+		"ttf-material-symbols-variable": "not-st",
+		"vimix-cursors":                 "bibata-cursor-theme",
+		"vulkan-icd-loader":             "vulkan-loader",
+		"xorg-xwayland":                 "xorg-server-xwayland",
+		"xpadneo-dkms":                  "xpadneo",
+		"amd-ucode":                     "linux-firmware-amd",
+		"intel-ucode":                   "linux-firmware-intel",
+
+		// Absent from Void: skipped here, hand-built or dropped per docs/void.md.
+		// (limine hooks are also in engine.go bootChainSkip; both must agree.)
+		"blesh":                  "",
+		"game-devices-udev":      "",
+		"hypridle":               "",
+		"limine-mkinitcpio-hook": "",
+		"limine-snapper-sync":    "",
+		"snap-pac":               "",
+		"ttf-maple-mono-nf":      "",
+		"waifu2x-ncnn-vulkan":    "",
+	},
+}
+
 func detectDistro(id, like string) *distro {
 	switch {
 	case id == "arch" || strings.Contains(like, "arch"):
 		return archLinux
+	case id == "void":
+		return voidLinux
 	case id == "debian" || strings.Contains(like, "debian"):
 		return debianLinux
 	}
@@ -189,8 +273,15 @@ func (e *engine) ryokuBin() string {
 }
 
 // detectHostDistro resolves the distro from /etc/os-release and latches it, so
-// the preflight gate and the later detection pass agree.
+// the preflight gate and the later detection pass agree. RYOKU_FORCE_DISTRO
+// overrides it, the same seam detect() honours.
 func detectHostDistro() *distro {
+	if id := strings.TrimSpace(os.Getenv("RYOKU_FORCE_DISTRO")); id != "" {
+		if d := detectDistro(id, ""); d != nil {
+			activeDistro = d
+			return d
+		}
+	}
 	b, err := os.ReadFile("/etc/os-release")
 	if err != nil {
 		return nil

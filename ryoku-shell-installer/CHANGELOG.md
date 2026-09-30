@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### New
+- **Void Linux is now a supported host.** `install.sh` and the binary accept
+  `xbps-install`, the new `zrepo` step trusts the signed z-repo binary
+  repository (Void imports its key from the signed index on the first sync),
+  and every service step goes through the init abstraction instead of
+  `systemctl`: on a runit box a service is a `/var/service` link, a conflicting
+  user daemon is a `~/runit` link, and SDDM is linked rather than enabled with
+  a target that does not exist. Void has no `[ryoku]` pacman repository, so the
+  desktop is built from the cloned payload with `deploy.sh` (the Debian lane's
+  shape) and the compositor pick follows the window managers actually
+  installed, which on Void means niri. `RYOKU_FORCE_DISTRO=void` exercises the
+  whole lane from a machine that is not Void. The package map, the runit
+  service table and the hand-build list are in `docs/void.md`.
+- **The lock survives a box without systemd.** The unlock guard used to
+  `exit 1` on a machine with no `systemd-inhibit`, so the lock screen could
+  never be unlocked. It now detects the missing systemd tooling, skips only the
+  sleep-block guard and still enforces the proof and the session check.
+
+### Changed
+- **The fork now fetches and tracks its own repository.** The payload clone,
+  `ryoku-track`, `ryoku recovery` and the issue link point at
+  `SrDicov/ryoku-void`, and the CLI's channel tracking accepts a checkout
+  whose origin is the fork.
+
 ### Fixed
 - **Converting a box that runs oh-my-zsh-git no longer dies at the desktop
   transaction.** ryoku-oh-my-zsh provides and replaces both upstream
