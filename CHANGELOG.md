@@ -5,6 +5,16 @@ for finer detail.
 
 ## Unreleased
 
+### New
+- **Void Linux fork.** The shell installer installs the Ryoku desktop on Void
+  with `xbps-install` and runs it on runit, and the payload comes from
+  `SrDicov/ryoku-void`. `ryoku/shell/deploy.sh` lays the desktop's daemons as
+  `~/runit` services on a runit box and keeps its systemd user units on Arch,
+  through one init abstraction. The Void package map, the z-repo repository it
+  trusts for what Void does not package, the runit service table and the
+  hand-build list are in `docs/void.md`. The ISO installer, `ryoku update` and
+  the boot guard remain Arch-only; see the same page for what that means.
+
 ### Fixed
 - Lock, suspend, lid-close and wake now share one fail-closed lifecycle across
   Hyprland and niri. Lockscreen generations change atomically during updates,
