@@ -1408,28 +1408,23 @@ func stepVoidRepo(e *engine) error {
 }
 
 // registerVoidZRepo wires the third-party z-repo after the Ryoku repository:
-// fetch its key into the trust dir, then write its /etc/xbps.d file, the same
-// key-before-config order the Ryoku repo follows here.
+// write its /etc/xbps.d file, then let xbps do the whole key job on the first
+// sync — it internalizes the signed repodata's key into
+// /var/db/xbps/keys/<fingerprint>.plist and converts nothing else. stdin is
+// fed the confirmation, since the engine runs xbps without a terminal.
 func registerVoidZRepo(e *engine, d *distro) error {
 	if strings.ContainsAny(d.zrepoURL, "\r\n") ||
 		!filepath.IsAbs(d.zrepoURL) && !strings.Contains(d.zrepoURL, "://") {
 		return fmt.Errorf("invalid z-repo repository %q: expected a URL or absolute path", d.zrepoURL)
-	}
-	if !strings.HasPrefix(d.zrepoKeyURL, "https://") || strings.ContainsAny(d.zrepoKeyURL, " \t\r\n") {
-		return fmt.Errorf("invalid z-repo key URL %q: expected an HTTPS URL", d.zrepoKeyURL)
-	}
-	keyPath := filepath.Join(voidTrustedKeyDir, d.zrepoKeyName+".plist")
-	if err := e.sudo("rm", "-f", keyPath); err != nil {
-		return err
-	}
-	if err := e.sudo("xbps-fetch", "-o", keyPath, d.zrepoKeyURL); err != nil {
-		return err
 	}
 	if err := e.sudoWrite(voidZRepoConfig, "repository="+d.zrepoURL+"\n"); err != nil {
 		return err
 	}
 	if err := e.sudo("chmod", "644", voidZRepoConfig); err != nil {
 		return err
+	}
+	if err := e.sudoSh(`printf 'y\n' | xbps-install -S`); err != nil {
+		return fmt.Errorf("importing the z-repo key: %w", err)
 	}
 	e.say(i18n.Tf("configured the z-repo XBPS repository in %s", voidZRepoConfig))
 	return nil

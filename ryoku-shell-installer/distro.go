@@ -32,10 +32,12 @@ type distro struct {
 
 	// z-repo (Void only): the third-party signed repository and the best-effort
 	// extras it serves after the base set. Empty on every other distro.
-	zrepoURL     string
-	zrepoKeyURL  string
-	zrepoKeyName string
-	zrepoExtras  []string
+	// zrepoKeyFP is the fingerprint xbps prints for the repo key; it also names
+	// the trust file xbps internalizes the key into (/var/db/xbps/keys/<fpr>.plist)
+	// and is what uninstall removes. Keep in step with the z-repo key.
+	zrepoURL    string
+	zrepoKeyFP  string
+	zrepoExtras []string
 
 	// build are the extra packages a fromSource install needs to compile the
 	// Go programs, the Ryoku.Blobs QML plugin, and the Hyprland plugins.
@@ -141,10 +143,9 @@ var voidLinux = &distro{
 	installFirstPrefix: "void-repo-",
 	// z-repo is the third-party signed XBPS repository: it serves what the
 	// Ryoku repo and Void's own repositories do not carry.
-	zrepoURL:     "https://github.com/SrDicov/z-repo/releases/download/stable",
-	zrepoKeyURL:  "https://raw.githubusercontent.com/SrDicov/z-repo/master/keys/zlinux-repo.pub",
-	zrepoKeyName: "zlinux-repo",
-	zrepoExtras:  []string{"zen-browser-bin"},
+	zrepoURL:    "https://github.com/SrDicov/z-repo/releases/download/stable",
+	zrepoKeyFP:  "02:16:21:e8:80:43:b6:16:d4:63:13:e5:5d:e1:32:b7",
+	zrepoExtras: []string{"zen-browser-bin"},
 }
 
 func fedoraDNFCommand() string {

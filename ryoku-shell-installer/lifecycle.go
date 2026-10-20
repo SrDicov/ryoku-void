@@ -236,12 +236,12 @@ func runUninstall(yes, dry bool) int {
 			}
 		}
 	}
-	if activeDistro.id == "void" && activeDistro.zrepoKeyName != "" {
+	if activeDistro.id == "void" && activeDistro.zrepoKeyFP != "" {
 		paths := []string{}
 		if _, err := os.Stat(voidZRepoConfig); err == nil {
 			paths = append(paths, voidZRepoConfig)
 		}
-		zKey := filepath.Join(voidTrustedKeyDir, activeDistro.zrepoKeyName+".plist")
+		zKey := filepath.Join(voidTrustedKeyDir, activeDistro.zrepoKeyFP+".plist")
 		if _, err := os.Stat(zKey); err == nil {
 			paths = append(paths, zKey)
 		}
