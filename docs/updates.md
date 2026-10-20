@@ -260,9 +260,11 @@ mirrored by `ryoku/shell/deploy.sh` on a dev box) into `~/.config`:
 - A short **seed list** (`generatedSeed` in
   `ryoku/cli/internal/updater/materialize.go`) is copied only when absent, never
   clobbered. It covers user-edited starting points such as Fastfetch and
-  Starship, Matugen palette siblings, kitty, ghostty and nvim, plus every
-  provider's per-machine files from `wm.ConfigSeeds`. Per-machine or user-owned
-  state survives updates for every installed provider, not just the active one.
+  Starship, Matugen palette siblings, kitty, ghostty and nvim, the Vencord
+  settings that turn on the Ryoku Discord theme in a Vesktop or Equibop profile
+  that has none yet, plus every provider's per-machine files from `wm.ConfigSeeds`.
+  Per-machine or user-owned state survives updates for every installed
+  provider, not just the active one.
 - The user overlay (`~/.config/ryoku/user_edits`, mirroring `~/.config`) is laid
   on top last, so a file there wins at its mirrored path; see below. Anything the
   package never ships (`hypr/user.lua`, `kitty/user.conf`, a forked module) is

@@ -6,17 +6,24 @@ vesktop_flatpak_root() {
   printf '%s\n' "$HOME/.var/app/dev.vencord.Vesktop/config/vesktop"
 }
 
-# The Vesktop directory in use under config root $1: the native one, else the
-# Flathub build's. Fails when neither has settings yet.
+# The Vesktop directory in use under config root $1. Ryoku seeds the native
+# Vencord settings on every box, so the native directory wins only once
+# Vesktop itself has run there (it keeps state.json and sessionData beside
+# them); otherwise the Flathub build's wins when it has settings. Fails when
+# neither has settings yet.
 vesktop_config_root() {
-  local root
-  for root in "$1/vesktop" "$(vesktop_flatpak_root)"; do
-    if [[ -f "$root/settings/settings.json" ]]; then
-      printf '%s\n' "$root"
-      return 0
-    fi
-  done
-  return 1
+  local native="$1/vesktop" flatpak
+  flatpak=$(vesktop_flatpak_root)
+  if [[ -f "$native/settings/settings.json" ]] &&
+    [[ -e "$native/state.json" || -e "$native/sessionData" ]]; then
+    printf '%s\n' "$native"
+  elif [[ -f "$flatpak/settings/settings.json" ]]; then
+    printf '%s\n' "$flatpak"
+  elif [[ -f "$native/settings/settings.json" ]]; then
+    printf '%s\n' "$native"
+  else
+    return 1
+  fi
 }
 
 vesktop_render_palette() (

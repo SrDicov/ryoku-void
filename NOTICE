@@ -136,3 +136,17 @@ distribution. The installer builds parakeet.cpp by the parakeet.cpp authors
 (https://github.com/mudler/parakeet.cpp, MIT) with its ggml submodule on the
 user's machine and downloads Moondream's Parakeet Redux weights, derived from
 NVIDIA Parakeet TDT 0.6B v3 (CC-BY-4.0); neither ships in a Ryoku package.
+
+The default Vesktop and Equibop theme
+(ryoku/apps/vesktop/themes/ryoku-discord.theme.css) is ryoku.theme.css v3.0.0
+from ryoku-discord by Ron (niqqudim, https://github.com/niqqudim/ryoku-discord)
+at commit d9a0f2d, shipped unmodified under a Ryoku file name so it never
+replaces a copy a user installed by hand. It builds on refact0r's midnight and
+system24 Discord themes
+(https://github.com/refact0r/midnight-discord and
+https://github.com/refact0r/system24, both MIT). The client loads the rest of
+its styles, fonts and artwork from the upstream site when the theme is enabled;
+none of that ships in a Ryoku package. It is released under the MIT License,
+which ships unchanged beside it and is installed as
+/usr/share/licenses/ryoku-desktop/LICENSE.ryoku-discord; that license is
+compatible with Ryoku's GPL-3 distribution.

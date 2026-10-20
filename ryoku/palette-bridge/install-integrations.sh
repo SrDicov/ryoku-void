@@ -136,8 +136,10 @@ if $want_vesktop; then
   set_matugen_section templates.vesktop \
     "$matugen_template_root/vesktop-colors.css" \
     "$merge_root/palette.css" "$merge_hook"
-  # Ryoku consumes the same palette roles itself; stacking Midnight changes its layout.
-  ryoku_selected=$(jq '(.enabledThemes // []) | any(ascii_downcase == "ryoku.theme.css")' "$settings")
+  # The Ryoku Discord theme (shipped as ryoku-discord.theme.css, or installed by
+  # hand as ryoku.theme.css) consumes the same palette roles itself, and
+  # stacking Midnight on it changes its layout.
+  ryoku_selected=$(jq '(.enabledThemes // []) | any(ascii_downcase | IN("ryoku.theme.css", "ryoku-discord.theme.css"))' "$settings")
   if [[ "$ryoku_selected" != true ]]; then
     install -d "$vesktop_root/themes"
     install -m 0644 "$project_root/vesktop/midnight-ryoku.theme.css" \

@@ -99,6 +99,15 @@ run_vesktop() {
     "$project_root/$1-integrations.sh" --vesktop
 }
 
+# The Vesktop default Ryoku ships keeps its theme and never gains Midnight.
+seed="$project_root/../apps/vesktop/settings/settings.json"
+cp "$seed" "$config_root/vesktop/settings/settings.json"
+run_vesktop install
+jq -e --slurpfile seed "$seed" '.useQuickCss == true and .enabledThemes == $seed[0].enabledThemes' \
+  "$config_root/vesktop/settings/settings.json" >/dev/null
+[[ ! -e "$config_root/vesktop/themes/midnight-ryoku.theme.css" ]]
+run_vesktop remove
+
 # The menu must keep Ryoku selected, including when upgrading a Midnight setup.
 printf '{"enabledThemes":["custom.theme.css","Ryoku.theme.css","midnight-ryoku.theme.css"]}\n' \
   > "$config_root/vesktop/settings/settings.json"
@@ -239,5 +248,24 @@ fi
 if grep -Fq '[templates.vesktop]' "$flatpak_config/ryoku/user_edits/matugen/apps.toml"; then
   printf 'FAIL: removal left the Flathub Vesktop Matugen hook\n' >&2; exit 1
 fi
+
+# Ryoku seeds the native Vencord settings on every box, and that seed alone
+# does not mean a native Vesktop runs: setup keeps following the Flathub build
+# and turns to the native profile once Vesktop has run there.
+seeded_vesktop="$flatpak_config/vesktop"
+mkdir -p "$seeded_vesktop/settings"
+cp "$seed" "$seeded_vesktop/settings/settings.json"
+printf '{}\n' > "$flatpak_vesktop/settings/settings.json"
+run_flatpak_vesktop install
+jq -e '.useQuickCss == true' "$flatpak_vesktop/settings/settings.json" >/dev/null
+cmp "$seed" "$seeded_vesktop/settings/settings.json"
+[[ ! -e "$seeded_vesktop/settings/quickCss.css" ]]
+run_flatpak_vesktop remove
+printf '{}\n' > "$seeded_vesktop/state.json"
+run_flatpak_vesktop install
+jq -e '.useQuickCss == true' "$seeded_vesktop/settings/settings.json" >/dev/null
+grep -Fq -- '--accent-2: #fedcba;' "$seeded_vesktop/settings/quickCss.css"
+[[ ! -e "$seeded_vesktop/themes/midnight-ryoku.theme.css" ]]
+run_flatpak_vesktop remove
 
 printf 'PASS: integration setup and removal are idempotent and preserve existing configuration\n'

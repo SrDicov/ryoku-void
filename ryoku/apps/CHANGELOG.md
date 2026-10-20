@@ -35,6 +35,21 @@
   now shared by plugins, bar styles and launchers instead of copied
   (`backend/provider_shell_qml.go`, `backend/product_views.go`,
   `backend/product_selection.go`).
+- `vesktop/`: **Ryoku's Discord theme is the default in Vesktop and Equibop.**
+  Ron's Ryoku theme (ryoku-discord v3.0.0) ships as `ryoku-discord.theme.css`
+  beside Matugen's Midnight (`matugen.css`), and a profile with no Vencord
+  settings yet starts with it turned on. An existing profile switches once on
+  update: Midnight, the Palette Bridge's Midnight base or no theme at all
+  becomes the Ryoku theme, and a theme picked from elsewhere stays. An open
+  client takes the switch at its next start, and a later choice in its theme
+  settings is kept. The Flathub Vesktop that Fedora and Void use gets the same
+  switch once it has run, with a copy of the theme in its own folder that the
+  doctor keeps current. The Ryostore copy of the theme gives way to the
+  shipped one once no open client can still be showing it, and a Palette
+  Bridge setup no longer layers Midnight under it (`vesktop/`,
+  `../cli/internal/doctor/reconcile_discord_theme.go`,
+  `../cli/internal/updater/materialize.go`,
+  `../palette-bridge/install-integrations.sh`).
 - `ryostore/`: **Ryostore looks like the Hub and shows products properly.** The
   store moves to the Hub's rail, page head and action bar, with Discover,
   categories, search and Library in the rail. An opened product leads with its

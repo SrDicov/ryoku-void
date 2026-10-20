@@ -1437,6 +1437,11 @@ seed_once "$here/../apps/kitty/current-theme.conf" "$cfg/kitty/current-theme.con
 mkdir -p "$cfg/ghostty"
 seed_once "$here/../apps/ghostty/config" "$cfg/ghostty/config"
 seed_once "$here/../apps/ghostty/ryoku-colors" "$cfg/ghostty/ryoku-colors"
+for discord in vesktop equibop; do
+  mkdir -p "$cfg/$discord/themes" "$cfg/$discord/settings"
+  cp -a "$here/../apps/vesktop/themes/ryoku-discord.theme.css" "$cfg/$discord/themes/"
+  seed_once "$here/../apps/vesktop/settings/settings.json" "$cfg/$discord/settings/settings.json"
+done
 mkdir -p "$cfg/wireplumber"; cp -a "$here/../apps/wireplumber/." "$cfg/wireplumber/"
 # session environment: read at the next login (by the systemd user manager, or
 # by /etc/profile.d/ryoku-environment-d.sh on runit), so niri and its spawns

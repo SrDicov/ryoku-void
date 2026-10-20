@@ -215,6 +215,20 @@ EOF
   # matugen owns ryoku-colors, which the config includes for the palette.
   install -d "$cfg/ghostty"
   cp -a "$_repo/ryoku/apps/ghostty/." "$cfg/ghostty/"
+  # Vesktop and Equibop: the Ryoku Discord theme beside Matugen's Midnight
+  # (matugen.css), plus a Vencord settings seed that enables it. The client
+  # rewrites that file, so materialize lays it only where the client has not
+  # written one yet; the doctor switches older profiles once. The theme is MIT;
+  # its license ships with the package, not in the user's themes folder.
+  local discord
+  for discord in vesktop equibop; do
+    install -Dm644 "$_repo/ryoku/apps/vesktop/themes/ryoku-discord.theme.css" \
+      "$cfg/$discord/themes/ryoku-discord.theme.css"
+    install -Dm644 "$_repo/ryoku/apps/vesktop/settings/settings.json" \
+      "$cfg/$discord/settings/settings.json"
+  done
+  install -Dm644 "$_repo/ryoku/apps/vesktop/themes/LICENSE" \
+    "$pkgdir/usr/share/licenses/ryoku-desktop/LICENSE.ryoku-discord"
 
   # neovim (LazyVim seed): the config only, not the repo docs.
   install -Dm644 "$_repo/ryoku/apps/nvim/init.lua"       "$cfg/nvim/init.lua"
