@@ -66,7 +66,7 @@ func TestEditionChoicesDefaultsAndDrops(t *testing.T) {
 		compositors  string
 	}{
 		{edition: "arch", browsers: "firefox,chromium,zen,none", shells: "fish,zsh,bash", fileManagers: "nautilus,dolphin,thunar", compositors: "hyprland,niri,wayfire"},
-		{edition: "void", browsers: "firefox,chromium,none", shells: "fish,zsh,bash", fileManagers: "nautilus,dolphin,thunar", compositors: "niri"},
+		{edition: "void", browsers: "firefox,chromium,none", shells: "fish,zsh,bash", fileManagers: "nautilus,dolphin,thunar", compositors: "hyprland,niri"},
 		{edition: "fedora", browsers: "firefox,chromium,none", shells: "fish,zsh,bash", fileManagers: "nautilus,dolphin,thunar", compositors: "hyprland,niri"},
 	} {
 		t.Run(test.edition, func(t *testing.T) {

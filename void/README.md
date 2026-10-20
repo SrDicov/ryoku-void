@@ -1,7 +1,8 @@
 # Void Linux
 
 This directory contains the experimental x86_64 glibc Void edition. It uses
-runit, Turnstile, elogind, SDDM, and niri. XBPS and runit integration stays
+runit, Turnstile, elogind, SDDM, and Hyprland (niri as the alternative).
+XBPS and runit integration stays
 here; runtime code reaches it through `ryoku-host`.
 
 Void cannot build Hyprland 0.55+ (it needs GCC 15 and C++26, while Void ships

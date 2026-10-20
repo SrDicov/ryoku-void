@@ -44,15 +44,14 @@ func TestVariantMarkerRoutesWizard(t *testing.T) {
 	compositor := stepByKey(t, flow, "compositor")
 	m := model{variant: variantVoid, flow: flow, idx: flowIndex(flow, "compositor"), picks: map[string]string{"compositor": wm.ProviderNiri}}
 	m.loadStep()
-	if len(compositor.items) != 2 || !m.pick.disabled[wm.ProviderHyprland] {
+	// Hyprland rides the z-repo on Void, so both compositors are offered and
+	// the fresh default is the first available one, Hyprland.
+	if len(compositor.items) != 2 || m.pick.disabled[wm.ProviderHyprland] {
 		t.Fatalf("Void compositor choices = %v, disabled = %v", compositor.items, m.pick.disabled)
 	}
 	selected := m.pick.items[m.pick.matches[m.pick.cursor]].key
-	if selected != wm.ProviderNiri {
-		t.Fatalf("Void compositor default = %q, want %q", selected, wm.ProviderNiri)
-	}
-	if !strings.Contains(compositor.items[0].hint, "GCC 15") {
-		t.Fatalf("disabled compositor has no package-table reason: %q", compositor.items[0].hint)
+	if selected != wm.ProviderHyprland {
+		t.Fatalf("Void compositor default = %q, want %q", selected, wm.ProviderHyprland)
 	}
 }
 
@@ -87,7 +86,7 @@ func TestVoidNoticeFollowsWelcome(t *testing.T) {
 	text := strings.Join(notice.desc, "\n")
 	for _, want := range []string{
 		"This Void edition is experimental.",
-		"Available window managers: niri.",
+		"Available window managers: hyprland, niri.",
 		"Use ryoku update --system for base-system updates.",
 		"XBPS has no update hooks; this keeps updates snapshotted.",
 	} {
