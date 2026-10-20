@@ -2,16 +2,6 @@
 
 Install the Ryoku desktop on an existing machine, without the ISO.
 
-<<<<<<< HEAD
-Arch-based hosts get the signed `[ryoku]` packages. Debian-based and Void
-hosts have no `[ryoku]` repository, so the desktop is built from the cloned
-payload with `ryoku/shell/deploy.sh`: dependencies come from apt (Debian) or
-xbps (Void), and the Go programs, QML modules and `Ryoku.Blobs` are compiled
-locally. The Hyprland compositor plugins need `makepkg` and are skipped there;
-the shell degrades to them being off. Void has no Hyprland stack in its
-official repositories at all, so Void installs are niri-first; see
-`docs/void.md` for the package/service map and the Hyprland hand-build list.
-=======
 Arch-based hosts install signed packages from `[ryoku]`. Void and Fedora are
 experimental editions in 1.0. Void installs the same desktop package set from
 the signed Ryoku XBPS repository, with niri, runit, elogind and Turnstile.
@@ -67,7 +57,6 @@ layout.
 
 Fedora stays on the nouveau NVIDIA driver. The conversion sets up snapshots on
 a btrfs root, does not offer Wayfire, and has no Fedora ISO.
->>>>>>> origin/unstable-dev
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryoku-dev/ryoku/main/ryoku-shell-installer/install.sh | bash
@@ -111,20 +100,13 @@ ryoku-shell-install --uninstall        # or: ... | bash -s -- --uninstall
 ## What it does
 
 `install.sh` is a dumb bootstrap: it verifies the machine is a supported
-<<<<<<< HEAD
-x86_64 family (pacman, xbps-install or apt-get) booting a supported init
-(systemd or runit), downloads the prebuilt `ryoku-shell-install`
-binary (checksummed) from this directory, and hands it the real terminal.
-Everything else is the binary, a bubbletea TUI sharing the ISO installer's
-visual language:
-=======
-x86_64 family (pacman, apt-get, xbps, dnf5 or dnf), downloads the prebuilt
+x86_64 family (pacman, apt-get, xbps, dnf5 or dnf) booting a supported init
+(systemd or runit), downloads the prebuilt
 `ryoku-shell-install` binary (checksummed) from this directory, and hands it the
 real terminal. On Fedora it refuses rpm-ostree and installs curl and git first
 when either is missing.
 Everything else is the binary, a Bubble Tea TUI using Ryoku's paper-and-ink
 terminal language:
->>>>>>> origin/unstable-dev
 
 1. **Scan** the machine: distro, GPU, Secure Boot state, display manager,
    network stack, installed desktops (GNOME/KDE/Cinnamon/Xfce), rival
