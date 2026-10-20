@@ -39,12 +39,14 @@ name, and the packages to pull from it.
 | `hyprutils`, `hyprlang`, `hyprcursor`, `hyprgraphics`, `aquamarine` | The Hyprland library stack, rebuilt against Void's toolchain |
 | `hyprwire` | The wire protocol Hyprland 0.56 speaks |
 | `hyprland` | The compositor, built with clang 21 |
-| `hypridle`, `xdg-desktop-portal-hyprland` | The idle daemon and the portal backend |
+| `xdg-desktop-portal-hyprland` | The Hyprland portal backend |
+| `hyprpolkitagent`, `hyprsunset`, `ryoku-desktop-hyprland` | The polkit authentication agent, the night-light color-temperature toggle and the Hyprland edition's desktop meta-package |
+| `hyprland-preview-share-picker` | The screen-share source chooser the portal calls by name |
 | `hyprgrass`, `hyprglass`, `imgborders`, `hypr-dynamic-cursors`, `ryoku-hypr-plugins` | The compositor plugins Ryoku ships |
 | `ryoku-keysounds`, `ryoku-keysounds-profiles` | The key sound plugin and its profiles |
 | `re2`, `lua55` | The libraries Hyprland 0.56 expects, at the versions it expects |
-| `game-devices-udev`, `pam-fprint-grosshack` | Hardware support Void does not package |
-| `localsend-bin`, `nvibrant`, `voxtype-bin`, `waifu2x-ncnn-vulkan` | The optional extras |
+| `game-devices-udev`, `pam-fprint-grosshack`, `asusctl` | Hardware support Void does not package |
+| `localsend-bin`, `nvibrant`, `waifu2x-ncnn-vulkan` | The optional extras |
 | `font-space-grotesk`, `font-maple-mono-nf`, `font-fraunces`, `vimix-cursor-theme`, `phinger-cursor-theme` | The fonts and cursors Ryoku ships |
 
 ## Building the Hyprland stack on Void
