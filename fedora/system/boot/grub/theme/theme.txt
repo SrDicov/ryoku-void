@@ -1,0 +1,79 @@
+# Ryoku GRUB theme: the Limine menu's layout on the Ryoku wallpaper. Cream ink
+# (#EAE2D5) on the wallpaper's near-black, the burnt-orange accent (#C75D2B)
+# for the title and the selected entry, the same palette as
+# system/boot/limine/limine.conf. ryoku-grub-menu installs it to
+# /boot/grub2/themes/ryoku and builds the "Ryoku Mono" fonts it names there.
+
+title-text: ""
+desktop-color: "#060607"
+desktop-image: "ryoku-wall.png"
+desktop-image-scale-method: "crop"
+terminal-font: "Ryoku Mono Regular 20"
+# Full screen: GRUB boots an entry inside its terminal window, and the default
+# window is an empty rectangle in the middle of the wallpaper.
+terminal-left: "0"
+terminal-top: "0"
+terminal-width: "100%"
+terminal-height: "100%"
+message-font: "Ryoku Mono Regular 16"
+message-color: "#8C857A"
+
++ label {
+  left = 0
+  top = 7%
+  width = 100%
+  align = "center"
+  font = "Ryoku Mono Regular 24"
+  color = "#C75D2B"
+  text = "Ryoku Bootloader"
+}
+
++ label {
+  left = 0
+  top = 7%+48
+  width = 100%
+  align = "center"
+  font = "Ryoku Mono Regular 16"
+  color = "#8C857A"
+  text = "ARROWS Select    ENTER Boot    ESC Back"
+}
+
++ label {
+  left = 0
+  top = 7%+76
+  width = 100%
+  align = "center"
+  font = "Ryoku Mono Regular 16"
+  color = "#8C857A"
+  text = "E Edit entry    C Console"
+}
+
++ boot_menu {
+  left = 20%
+  top = 28%
+  width = 60%
+  height = 36%
+  item_font = "Ryoku Mono Regular 20"
+  item_color = "#EAE2D5"
+  selected_item_font = "Ryoku Mono Regular 20"
+  selected_item_color = "#060607"
+  selected_item_pixmap_style = "select_*.png"
+  icon_width = 0
+  icon_height = 0
+  item_icon_space = 14
+  item_height = 32
+  item_padding = 10
+  item_spacing = 4
+  scrollbar = false
+}
+
++ label {
+  id = "__timeout__"
+  left = 0
+  top = 92%
+  width = 100%
+  align = "center"
+  font = "Ryoku Mono Regular 20"
+  color = "#88A57D"
+  text = "Booting in %d s"
+}

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -u
+
+line() { printf '%-22s %s\n' "$1" "$2"; }
+
+printf '%s\n' 'Ryotunes diagnostics (sanitized)'
+printf '%s\n' '--------------------------------'
+line 'Ryotunes package:' "$(xbps-query -p pkgver ryotunes 2>/dev/null || printf 'source/unpackaged')"
+line 'Kernel:' "$(uname -sr 2>/dev/null || printf 'unknown')"
+line 'Architecture:' "$(uname -m 2>/dev/null || printf 'unknown')"
+line 'Session:' "${XDG_SESSION_TYPE:-unknown}"
+line 'Desktop:' "${XDG_CURRENT_DESKTOP:-unknown}"
+line 'Wayland display:' "${WAYLAND_DISPLAY:+present}"
+webkit_version="$(pkg-config --modversion webkit2gtk-4.1 2>/dev/null || printf 'unknown')"
+line 'WebKitGTK:' "$webkit_version"
+line 'mpv:' "$(mpv --version 2>/dev/null | head -n 1 | sed 's/^mpv //')"
+
+printf '\n%s\n' 'Dependency status'
+for package in libwebkit2gtk41 mpv openssl librsvg xdg-utils quickshell; do
+	if xbps-query -e "$package" >/dev/null 2>&1; then
+		printf '  [ok] %s\n' "$package"
+	else
+		printf '  [!!] %s missing\n' "$package"
+	fi
+done
+
+printf '\n%s\n' 'This report does not include Ryotunes logs, account details, cookies, tokens, local file paths, or network endpoints.'

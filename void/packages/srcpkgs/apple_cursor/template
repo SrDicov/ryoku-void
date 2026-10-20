@@ -1,0 +1,18 @@
+# Template file for 'apple_cursor'
+pkgname=apple_cursor
+version=2.0.1
+revision=1
+create_wrksrc=yes
+short_desc="Open source macOS cursor themes"
+maintainer="Ryoku <releases@ryoku.dev>"
+license="GPL-3.0-only"
+homepage="https://github.com/ful1e5/apple_cursor"
+distfiles="${homepage}/releases/download/v${version}/macOS.tar.xz"
+checksum=9c6e5e13b068ce51a9e90a9abd6ce232ec7d25d4ceb05aa8ac76efbb99c76762
+
+
+do_install() {
+	vmkdir usr/share/icons
+	vcopy macOS usr/share/icons
+	vcopy macOS-White usr/share/icons
+}

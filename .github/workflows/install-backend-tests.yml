@@ -39,6 +39,10 @@ on:
       - 'tests/install-preflight.sh'
       - 'tests/install-clock-skew.sh'
       - 'tests/install-dryrun-matrix.sh'
+      - 'tests/install-dryrun-harness.sh'
+      - 'tests/install-edition-parity.sh'
+      - 'tests/install-void-dryrun-matrix.sh'
+      - 'void/iso/backend/**'
       - 'tests/install-offline.sh'
       - 'tests/install-hooks.sh'
       - 'tests/release-offline-builds.sh'
@@ -88,6 +92,10 @@ on:
       - 'tests/install-preflight.sh'
       - 'tests/install-clock-skew.sh'
       - 'tests/install-dryrun-matrix.sh'
+      - 'tests/install-dryrun-harness.sh'
+      - 'tests/install-edition-parity.sh'
+      - 'tests/install-void-dryrun-matrix.sh'
+      - 'void/iso/backend/**'
       - 'tests/install-offline.sh'
       - 'tests/install-hooks.sh'
       - 'tests/release-offline-builds.sh'
@@ -156,6 +164,11 @@ jobs:
       - name: Dry-run step/sentinel matrix
         shell: bash
         run: bash tests/install-dryrun-matrix.sh
+
+      - name: Arch and Void installs reach the same first boot
+        shell: bash
+        run: bash tests/install-edition-parity.sh
+
 
       - name: Offline install path (no network, baked repo, refusals before the wipe)
         shell: bash

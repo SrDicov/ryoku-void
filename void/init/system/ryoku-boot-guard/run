@@ -1,0 +1,19 @@
+#!/bin/sh
+# Runit cannot order this before SDDM; boot-guard is safe if they overlap.
+exec 2>&1
+
+. "${RYOKU_INIT_LIB:-/usr/lib/ryoku/runit}/wait-for"
+load_session_env
+BIN=${RYOKU_BIN_DIR:-/usr/bin}
+
+# The update marker may appear during stage 2, so wait briefly for it.
+
+wait_file /var/lib/ryoku/update-pending.json "${RYOKU_WAIT_PENDING:-10}" || exec sv down .
+
+if command -v timeout >/dev/null 2>&1; then
+	timeout 600 "$BIN/ryoku" boot-guard || true
+else
+	"$BIN/ryoku" boot-guard || true
+fi
+
+exec sv down .

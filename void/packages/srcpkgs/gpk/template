@@ -1,0 +1,19 @@
+# Template file for 'gpk'
+pkgname=gpk
+version=0.6.10
+revision=1
+archs="x86_64"
+create_wrksrc=yes
+skip_extraction="gpk-linux-amd64"
+short_desc="GlazePKG package manager dashboard"
+maintainer="Ryoku <releases@ryoku.dev>"
+license="GPL-3.0-or-later"
+homepage="https://github.com/neur0map/glazepkg"
+distfiles="${homepage}/releases/download/v${version}/gpk-linux-amd64"
+checksum=b4e43c2428a3c680f9ce97855d44522e18cfce4bb933e5e622c52d3db17a7be3
+nostrip=yes
+
+# Upstream's release binary detects XBPS at runtime; it has no pacman dependency.
+do_install() {
+	vbin "${XBPS_SRCDISTDIR}/${pkgname}-${version}/gpk-linux-amd64" gpk
+}

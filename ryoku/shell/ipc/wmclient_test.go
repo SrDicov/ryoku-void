@@ -102,6 +102,78 @@ func TestPublishCarriesKeyboardAndVersions(t *testing.T) {
 	}
 }
 
+// The frame is the only path a capability has to a QML consumer, and consumers
+// read Wm.caps.<name> === true. A capability that exists but is missing from
+// the map reads as absent, so the affordance gated on it silently disappears.
+// With no provider installed every Has is false, which is exactly what makes
+// the key-presence check the real assertion here.
+func TestPublishCarriesEveryCapability(t *testing.T) {
+	d := &daemon{wmc: wm.OpenNamed("does-not-exist")}
+	d.wmTopic = newStateTopic()
+	sub := d.wmTopic.subscribe()
+	defer d.wmTopic.unsubscribe(sub)
+
+	d.onWMFrame(wm.Frame{Kind: wm.FrameReady})
+
+	select {
+	case frame := <-sub.frames:
+		var out wmTopicFrame
+		if err := json.Unmarshal(frame, &out); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range wm.All() {
+			if _, ok := out.Caps[c]; !ok {
+				t.Errorf("caps frame omits %q, so a consumer cannot gate on it", c)
+			}
+		}
+		if got := out.Caps[wm.CapPersistentScreenCapture]; got {
+			t.Error("a missing provider must not report persistent screen capture")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no frame published")
+	}
+}
+
+func TestFocusUsesCompactTopic(t *testing.T) {
+	d := &daemon{wmc: wm.OpenNamed("does-not-exist")}
+	d.wmTopic = newStateTopic()
+	d.wmFocusTopic = newStateTopic()
+	full := d.wmTopic.subscribe()
+	focus := d.wmFocusTopic.subscribe()
+	defer d.wmTopic.unsubscribe(full)
+	defer d.wmFocusTopic.unsubscribe(focus)
+
+	d.onWMFrame(wm.Frame{Kind: wm.FrameFocus, FocusedOutput: "DP-1"})
+
+	select {
+	case frame := <-focus.frames:
+		var out wmFocusFrame
+		if err := json.Unmarshal(frame, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.FocusedOutput != "DP-1" || out.Version != 1 {
+			t.Fatalf("focus frame = %+v, want DP-1 at version 1", out)
+		}
+		if len(frame) >= 128 {
+			t.Fatalf("focus frame is %d bytes; compact topic unexpectedly carries snapshot state", len(frame))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no compact focus frame published")
+	}
+	select {
+	case frame := <-full.frames:
+		t.Fatalf("focus change woke full wm topic with %d bytes", len(frame))
+	default:
+	}
+
+	d.onWMFrame(wm.Frame{Kind: wm.FrameFocus, FocusedOutput: "DP-1"})
+	select {
+	case frame := <-focus.frames:
+		t.Fatalf("duplicate focus published %q", frame)
+	default:
+	}
+}
+
 func BenchmarkActiveMonitorCached(b *testing.B) {
 	d := &daemon{}
 	d.onWMFrame(wm.Frame{Kind: wm.FrameFocus, FocusedOutput: "DP-1"})

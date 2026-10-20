@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# ryoku-channel-status: publish a channel build's current state beside its
+# release.json, preserving the original start time for repeated writes from the
+# same commit.
+#
+# usage: ryoku-channel-status <rclone-remote-dir> <building|published|failed> <sha> --channel <name> --release <release> --run <url>
+# needs: rclone (configured, see bin/ryoku-r2-config), jq
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: ryoku-channel-status <rclone-remote-dir> <building|published|failed> <sha> \
+       --channel <name> --release <release> --run <url>
+
+Write status.json in the remote directory. Existing status is read only to keep
+started when it belongs to the same commit; an absent file is expected.
+
+flags:
+  --channel <name>    channel written to status.json
+  --release <release> release or unstable build name
+  --run <url>         GitHub Actions run URL
+  --help              show this help
+EOF
+}
+
+die() { printf 'ryoku-channel-status: %s\n' "$*" >&2; exit 1; }
+usage_error() {
+  printf 'ryoku-channel-status: %s\n' "$1" >&2
+  usage >&2
+  exit 2
+}
+need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
+
+if (($#)) && [[ $1 == -h || $1 == --help ]]; then
+  usage
+  exit 0
+fi
+(($# >= 3)) || usage_error "missing required arguments"
+remote_dir=${1%/}
+state=$2
+sha=$3
+shift 3
+channel=
+release=
+run_url=
+while (($#)); do
+  case "$1" in
+    --channel)
+      (($# >= 2)) || usage_error "--channel needs a value"
+      channel=$2
+      shift 2
+      ;;
+    --release)
+      (($# >= 2)) || usage_error "--release needs a value"
+      release=$2
+      shift 2
+      ;;
+    --run)
+      (($# >= 2)) || usage_error "--run needs a value"
+      run_url=$2
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *) usage_error "unknown argument: $1" ;;
+  esac
+done
+
+case "$state" in
+  building|published|failed) ;;
+  *) usage_error "state must be building, published, or failed" ;;
+esac
+[[ -n $remote_dir ]] || usage_error "remote directory must not be empty"
+[[ -n $sha ]] || usage_error "SHA must not be empty"
+[[ -n $channel ]] || usage_error "--channel is required"
+[[ -n $release ]] || usage_error "--release is required"
+[[ -n $run_url ]] || usage_error "--run is required"
+need jq
+need rclone
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+old="$tmp/old.json"
+out="$tmp/status.json"
+if ! rclone cat "$remote_dir/status.json" > "$old" 2>/dev/null; then
+  : > "$old"
+fi
+
+now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+started=
+if [[ -s $old ]]; then
+  started=$(jq -er --arg sha "$sha" \
+    'select(.commit == $sha) | .started | select(type == "string" and length > 0)' \
+    "$old" 2>/dev/null || true)
+fi
+[[ -n $started ]] || started=$now
+finished=
+[[ $state == building ]] || finished=$now
+
+jq -n \
+  --arg channel "$channel" \
+  --arg state "$state" \
+  --arg commit "$sha" \
+  --arg release "$release" \
+  --arg run "$run_url" \
+  --arg started "$started" \
+  --arg finished "$finished" \
+  '{channel: $channel, state: $state, commit: $commit, release: $release,
+    run: $run, started: $started, finished: $finished}' > "$out"
+
+rclone copyto "$out" "$remote_dir/status.json" \
+  --header-upload 'Cache-Control: no-cache, must-revalidate'
+cat "$out"

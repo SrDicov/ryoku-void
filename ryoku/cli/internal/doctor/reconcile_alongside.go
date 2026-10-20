@@ -81,6 +81,9 @@ func efibootmgrVerbose() string {
 // the exact command instead. not an alongside box, or no efibootmgr, = nothing
 // to watch. never writes NVRAM.
 func reconcileAlongsideBootEntry(_ bool) recResult {
+	if !limineManagedBoot() {
+		return unmanagedBootResult()
+	}
 	if !isAlongsideSystem(readFileSafe("/etc/fstab"), sys.Exists(alongsideHopPath)) {
 		return okRes(i18n.T("not an alongside install (no shared ESP at /efi with our stage-1 hop)"))
 	}

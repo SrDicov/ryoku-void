@@ -1,0 +1,25 @@
+#!/bin/sh
+# Work around BlueZ A2DP disconnects after WirePlumber registers its endpoints.
+# The session wrapper runs this as root so it can control bluetoothd.
+exec 2>&1
+
+. "${RYOKU_INIT_LIB:-/usr/lib/ryoku/runit}/wait-for"
+load_session_env
+
+_btsys=${RYOKU_BT_SYS:-/sys}
+_found=0
+for _hci in "$_btsys"/class/bluetooth/*; do
+	[ -e "$_hci" ] && _found=1 && break
+done
+[ "$_found" -eq 1 ] || exec sv down .
+
+wait_dbus org.freedesktop.PipeWire "${RYOKU_WAIT_WIREPLUMBER:-90}" || exec sv down .
+
+# Bound the restart because sv has no timeout.
+if command -v timeout >/dev/null 2>&1; then
+	timeout 30 sv restart bluetoothd || true
+else
+	sv restart bluetoothd || true
+fi
+
+exec sv down .

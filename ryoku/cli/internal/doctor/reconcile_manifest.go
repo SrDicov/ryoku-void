@@ -1,13 +1,11 @@
 package doctor
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
-	"time"
 
+	"ryoku-cli/internal/host"
 	"ryoku-cli/internal/ryokumanifest"
 	"ryoku-cli/internal/sys"
 	"ryoku-cli/internal/updater"
@@ -26,8 +24,9 @@ import (
 // The rules, in the order they are decided:
 //
 //   - A name the manifest wants and this box lacks is installed, unless it was
-//     present when the baseline was saved -- then the user deleted it and it
-//     stays deleted. This also self-heals a box that never received a name the
+//     present when the baseline was saved OR it sits in the provisioned ledger
+//     -- then the user (or the installer's picker) removed it and it stays
+//     deleted. This also self-heals a box that never received a name the
 //     release has always carried.
 //   - A name the release RETIRED is reported, never uninstalled. A box keeps
 //     what it has; removing it is the user's call.
@@ -43,30 +42,32 @@ import (
 // mirror, or no network, reports what did not land and moves on.
 
 var (
-	// installManifestPkgs is one bounded transaction for the whole added set.
 	installManifestPkgs = func(pkgs []string) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
-		args := append([]string{"pacman", "-S", "--needed", "--noconfirm"}, pkgs...)
-		_ = exec.CommandContext(ctx, "sudo", args...).Run()
+		_ = sys.Sudo(append([]string{"ryoku-host", "pkg", "install"}, pkgs...)...)
 	}
-	// installManifestAUR arrives through the AUR helper, best-effort: the set is
-	// online-only by contract, so a box without a helper or a network just
-	// reports the miss, exactly as the installer's post-install AUR step does.
 	installManifestAUR = func(pkgs []string) {
-		if !sys.Has("yay") {
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
-		defer cancel()
-		args := append([]string{"yay", "-S", "--needed", "--noconfirm", "--answerupgrade", "all"}, pkgs...)
-		_ = exec.CommandContext(ctx, "sudo", args...).Run()
+		_ = sys.Sudo(append([]string{"ryoku-host", "pkg", "install", "--aur"}, pkgs...)...)
 	}
 )
 
+func supportedManifestPackages(manager host.PackageManager, names []string) (supported, unavailable []string) {
+	for _, name := range names {
+		if doctorPackageUnavailable(manager, name) {
+			unavailable = append(unavailable, name)
+			continue
+		}
+		supported = append(supported, name)
+	}
+	return supported, unavailable
+}
+
 func reconcileManifest(checkOnly bool) recResult {
-	if !hasPacman() {
-		return okRes(i18n.T("not a pacman box; the manifest is the installer's business"))
+	manager, managerErr := doctorPackageManager()
+	if hasPacman() {
+		manager, managerErr = host.Pacman, nil
+	}
+	if managerErr != nil || manager != host.Pacman && manager != host.XBPS && manager != host.DNF {
+		return okRes(i18n.T("the package manifest is not managed on this host"))
 	}
 	served, err := updater.FetchManifest()
 	if err != nil {
@@ -79,17 +80,30 @@ func reconcileManifest(checkOnly bool) recResult {
 	if err != nil {
 		return warnRes(i18n.T("could not read the installed set: %v"), err)
 	}
+	installed = updater.SatisfiedByProviders(served, installed)
 	var prev *ryokumanifest.Manifest
-	var prevPresent map[string]bool
+	prevPresent := map[string]bool{}
 	if applied != nil {
 		prev = &applied.Manifest
 		prevPresent = applied.PresentSet()
 	}
+	// The provisioned ledger records intent the presence baseline cannot see:
+	// packages the installer's browser/apps picker removed before they were
+	// ever delivered, and apps the doctor delivered once and the user deleted.
+	// Reading it as present makes both classes permanent removals instead of
+	// "never delivered" self-heals.
+	for name := range provisioned() {
+		prevPresent[name] = true
+	}
 	plan := updater.PlanManifest(prev, prevPresent, &served, installed)
+	var unavailable, skipped []string
+	plan.Install, unavailable = supportedManifestPackages(manager, plan.Install)
+	plan.AUR, skipped = supportedManifestPackages(manager, plan.AUR)
+	unavailable = union(unavailable, skipped)
 
 	if checkOnly {
-		return wouldRes("%s", planSummary(&plan)).
-			withFix(i18n.T("run `ryoku doctor` (or `ryoku update`) to apply"))
+		return withUnavailablePackages(wouldRes("%s", planSummary(manager, &plan)).
+			withFix(i18n.T("run `ryoku doctor` (or `ryoku update`) to apply")), unavailable)
 	}
 
 	// The provisioned lane (the deliver-once apps) is reconcileShippedApps'
@@ -100,7 +114,7 @@ func reconcileManifest(checkOnly bool) recResult {
 	if len(plan.Install) > 0 {
 		installManifestPkgs(plan.Install)
 		for _, pkg := range plan.Install {
-			if sys.PkgInstalled(pkg) {
+			if doctorPackageInstalled(pkg) {
 				landed = append(landed, pkg)
 			} else {
 				missed = append(missed, pkg)
@@ -109,10 +123,16 @@ func reconcileManifest(checkOnly bool) recResult {
 	}
 	var aurMissed []string
 	if len(plan.AUR) > 0 {
-		installManifestAUR(plan.AUR)
+		if manager == host.DNF {
+			installManifestPkgs(plan.AUR)
+		} else {
+			installManifestAUR(plan.AUR)
+		}
 		for _, pkg := range plan.AUR {
-			if !sys.PkgInstalled(pkg) {
+			if !doctorPackageInstalled(pkg) {
 				aurMissed = append(aurMissed, pkg)
+			} else if manager == host.DNF {
+				landed = append(landed, pkg)
 			}
 		}
 	}
@@ -124,38 +144,53 @@ func reconcileManifest(checkOnly bool) recResult {
 	// "never delivered" and reinstalled on a later run.
 	if len(missed) == 0 && len(aurMissed) == 0 {
 		if err := updater.SaveApplied(served, updater.StickyPresent(applied, served, installed)); err != nil {
-			return warnRes(i18n.T("converged, but could not save the manifest: %v"), err)
+			return withUnavailablePackages(warnRes(i18n.T("converged, but could not save the manifest: %v"), err), unavailable)
 		}
 	}
 
+	var result recResult
 	switch {
 	case len(missed) > 0:
-		return warnRes(i18n.T("manifest: %s did not land"), strings.Join(missed, ", ")).
-			withFix("sudo pacman -Sy && sudo pacman -S %s", strings.Join(missed, " "))
+		fix := doctorInstallAdvice(missed...)
+		if manager == host.Pacman {
+			fix = fmt.Sprintf("sudo pacman -Sy && sudo pacman -S %s", strings.Join(missed, " "))
+		}
+		result = warnRes(i18n.T("manifest: %s did not land"), strings.Join(missed, ", ")).
+			withFix(fix)
 	case len(aurMissed) > 0:
-		return noteRes(i18n.T("manifest: %s await the AUR helper or a network"), strings.Join(aurMissed, ", ")).
-			withFix("yay -S %s", strings.Join(aurMissed, " "))
+		if manager == host.Pacman {
+			result = noteRes(i18n.T("manifest: %s await the AUR helper or a network"), strings.Join(aurMissed, ", ")).
+				withFix("yay -S %s", strings.Join(aurMissed, " "))
+		} else {
+			result = noteRes(i18n.T("manifest: %s await the package repository or a network"), strings.Join(aurMissed, ", ")).
+				withFix(doctorInstallAdvice(aurMissed...))
+		}
 	case len(landed) > 0:
-		return fixedRes(i18n.T("delivered %s from the %s manifest"),
+		result = fixedRes(i18n.T("delivered %s from the %s manifest"),
 			strings.Join(landed, ", "), served.Release)
 	case len(plan.Retired) > 0:
-		return noteRes(i18n.T("%s retired by %s stay installed (delete them by hand to reclaim)"),
+		result = noteRes(i18n.T("%s retired by %s stay installed (delete them by hand to reclaim)"),
 			strings.Join(plan.Retired, ", "), served.Release)
 	case applied == nil:
-		return okRes(i18n.T("baseline recorded against %s"), served.Release)
+		result = okRes(i18n.T("baseline recorded against %s"), served.Release)
 	default:
-		return okRes(i18n.T("the box matches the %s manifest"), served.Release)
+		result = okRes(i18n.T("the box matches the %s manifest"), served.Release)
 	}
+	return withUnavailablePackages(result, unavailable)
 }
 
 // planSummary renders a check-only plan as one line, so `ryoku doctor --check`
 // says what a real run would do without doing it.
-func planSummary(p *updater.Plan) string {
+func planSummary(manager host.PackageManager, p *updater.Plan) string {
 	var parts []string
-	if len(p.Install) > 0 {
-		parts = append(parts, fmt.Sprintf("install %s", strings.Join(p.Install, ", ")))
+	install := p.Install
+	if manager == host.DNF {
+		install = append(append([]string{}, install...), p.AUR...)
 	}
-	if len(p.AUR) > 0 {
+	if len(install) > 0 {
+		parts = append(parts, fmt.Sprintf("install %s", strings.Join(install, ", ")))
+	}
+	if len(p.AUR) > 0 && manager != host.DNF {
 		parts = append(parts, fmt.Sprintf("aur %s", strings.Join(p.AUR, ", ")))
 	}
 	if len(p.UserGone) > 0 {
@@ -185,12 +220,17 @@ func manifestVerify() (updater.VerifyReport, *ryokumanifest.Manifest, error) {
 	if err != nil {
 		return updater.VerifyReport{}, nil, err
 	}
+	installed = updater.SatisfiedByProviders(served, installed)
 	explicit, err := updater.PacmanExplicit()
 	if err != nil {
 		return updater.VerifyReport{}, nil, err
 	}
 	applied := updater.LoadApplied()
-	r := updater.Verify(served, installed, explicit, applied.PresentSet())
+	present := applied.PresentSet()
+	for name := range provisioned() {
+		present[name] = true // the same ledger union the reconciler reads
+	}
+	r := updater.Verify(served, installed, explicit, present)
 	if applied == nil {
 		r.NotSaved = true
 	}

@@ -1,0 +1,14 @@
+#!/bin/sh
+# runsv passes -1 for a requested down; crashes must not run prepare-stop.
+exec 2>&1
+
+BIN=${RYOKU_BIN_DIR:-/usr/bin}
+_status=$1
+
+"$BIN/ryoku-power-cutover" qylock-guards-stop >/dev/null 2>&1 || true
+
+if [ "$_status" -eq -1 ]; then
+	"$BIN/ryoku-qylock-activate" --prepare-stop || true
+fi
+
+exit 1

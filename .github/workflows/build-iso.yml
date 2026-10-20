@@ -1,9 +1,12 @@
 name: Build ISO
 
 # plain-Arch variant. fires on a v* release tag (cut from main) or a manual
-# dispatch, and calls the reusable builder with variant=plain. this workflow's
-# own run counter is the tracking id (r<run> surfaced as "R<run>" on the site),
-# so plain keeps its established sequence.
+# dispatch, and calls the reusable builder with variant=plain. a maintainer can
+# dispatch from unstable-dev with
+# `-f publish=false -f repo_url=https://repo.ryoku.dev/stable/channels/testing/x86_64`
+# to get a testing ISO as the `ryoku-iso` artifact. this workflow's own run
+# counter is the tracking id (r<run> surfaced as "R<run>" on the site), so plain
+# keeps its established sequence.
 on:
   workflow_dispatch:
     inputs:
@@ -21,6 +24,11 @@ on:
         required: false
         default: ''
         type: string
+      publish:
+        description: 'Upload the ISO and move the latest pointer; false keeps it as a workflow artifact only'
+        required: false
+        default: true
+        type: boolean
   push:
     tags:
       - 'v*'
@@ -37,4 +45,5 @@ jobs:
       variant: plain
       release_stage: ${{ github.event.inputs.release_stage || 'beta' }}
       repo_url: ${{ github.event.inputs.repo_url || '' }}
+      publish: ${{ github.event.inputs.publish != 'false' }}
     secrets: inherit

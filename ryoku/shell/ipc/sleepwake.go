@@ -35,9 +35,14 @@ var (
 	// login1 can reject Inhibit briefly while the previous sleep operation is
 	// still finishing. Retry in-order so an acquire can never overtake a later
 	// PrepareForSleep(true) edge.
-	sleepGuardRetry       = 2 * time.Second
-	login1CallWait        = 2 * time.Second
-	sleepReconnectStep    = 100 * time.Millisecond
+	sleepGuardRetry    = 2 * time.Second
+	login1CallWait     = 2 * time.Second
+	sleepReconnectStep = 100 * time.Millisecond
+	// The released block fd is observed by logind asynchronously (it polls
+	// the fd); Suspend must not overtake that observation or login1 denies
+	// the daemon's own transaction. Poll its inhibitor list to confirm.
+	blockReleaseWait      = 2 * time.Second
+	blockReleasePoll      = 25 * time.Millisecond
 	errLogin1OwnerRestart = errors.New("login1 D-Bus owner changed")
 	errLogin1SignalLost   = errors.New("login1 signal stream ended")
 )
@@ -174,6 +179,7 @@ type sleepCycle struct {
 	disconnected    <-chan struct{}
 	sessionPath     dbus.ObjectPath
 	activeCheck     func(context.Context) (bool, error)
+	blockCleared    func(context.Context) (bool, error)
 	activeMu        sync.RWMutex
 	active          bool
 	sessionBound    bool
@@ -488,6 +494,21 @@ func (s *sleepCycle) requestSuspendContext(requestCtx context.Context) error {
 	}
 
 	s.block.release()
+	// logind watches the block fd on its own schedule: a Suspend that
+	// overtook the close is denied by the daemon's own inhibitor (the #324
+	// race). Do not call Suspend until login1's inhibitor list stops naming
+	// this process as a sleep blocker.
+	clearCtx, clearCancel := context.WithTimeout(requestCtx, blockReleaseWait)
+	cleared := s.awaitBlockCleared(clearCtx)
+	clearCancel()
+	if err := requestCtx.Err(); err != nil {
+		s.restoreProtectionLocked()
+		return err
+	}
+	if !cleared {
+		s.restoreProtectionLocked()
+		return fmt.Errorf("request suspend: login1 still reports the released block inhibitor")
+	}
 	ctx, cancel := context.WithTimeout(requestCtx, login1CallWait)
 	defer cancel()
 	if err := s.suspend(ctx); err != nil {
@@ -500,12 +521,58 @@ func (s *sleepCycle) requestSuspendContext(requestCtx context.Context) error {
 	return nil
 }
 
+// restoreProtectionLocked re-holds the guard after an aborted suspend
+// transaction and reports failure through the retry channel.
+func (s *sleepCycle) restoreProtectionLocked() {
+	if !s.protectLocked() {
+		s.logf("ryoku-shell: aborted suspend and sleep protection could not be restored")
+		s.requestProtectionRetry()
+	}
+}
+
+// awaitBlockCleared waits until login1's inhibitor list no longer carries a
+// sleep block held by this process. A nil blockCleared check (tests, a login1
+// without the property) is treated as cleared so the call never wedges.
+func (s *sleepCycle) awaitBlockCleared(ctx context.Context) bool {
+	if s.blockCleared == nil {
+		return true
+	}
+	for {
+		cleared, err := s.blockCleared(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return false
+			}
+			s.logf("ryoku-shell: reading login1 inhibitors: %v", err)
+			cleared = true // a list we cannot read must not stall the suspend
+		}
+		if cleared {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(blockReleasePoll):
+		}
+	}
+}
+
 type login1SessionInfo struct {
 	ID   string
 	UID  uint32
 	User string
 	Seat string
 	Path dbus.ObjectPath
+}
+
+// login1InhibitorRow decodes one ListInhibitors entry, signature (ssssuu).
+type login1InhibitorRow struct {
+	What string
+	Who  string
+	Why  string
+	Mode string
+	UID  uint32
+	PID  uint32
 }
 
 func login1SessionProperty(
@@ -848,6 +915,20 @@ func (d *daemon) connectSleepGuard() (_ *connectedSleepGuard, err error) {
 			return conn.Object(login1Bus, login1Path).
 				CallWithContext(ctx, login1Interface+".Suspend", 0, false).Err
 		},
+		blockCleared: func(ctx context.Context) (bool, error) {
+			var rows []login1InhibitorRow
+			if err := conn.Object(login1Bus, login1Path).
+				CallWithContext(ctx, login1Interface+".ListInhibitors", 0).Store(&rows); err != nil {
+				return false, err
+			}
+			pid := uint32(os.Getpid())
+			for _, r := range rows {
+				if r.What == "sleep" && r.Mode == "block" && r.PID == pid {
+					return false, nil
+				}
+			}
+			return true, nil
+		},
 		sleepingCheck: func(ctx context.Context) (bool, error) {
 			var value dbus.Variant
 			err := conn.Object(login1Bus, login1Path).CallWithContext(
@@ -970,35 +1051,83 @@ func (d *daemon) superviseSleepWake() {
 }
 
 var (
-	qylockUnlockGuardActive = func(unit string) bool {
-		return exec.Command("systemctl", "--user", "is-active", "--quiet", unit).Run() == nil
-	}
-	qylockUnlockGuardStop = func(unit string) error {
-		return exec.Command("systemctl", "--user", "stop", unit).Run()
-	}
+	qylockUnlockGuardActive = hostUserServiceActive
+	qylockUnlockGuardStop   = stopHostUserService
 )
 
+// How often the release below looks. It starts quick, because an unlock
+// should not be followed by a visible wait, and eases off while nothing is
+// happening, because the only thing a tick can notice then is a guard
+// appearing and nobody is waiting on that.
+var (
+	qylockGuardPoll    = 100 * time.Millisecond
+	qylockGuardPollMax = 5 * time.Second
+)
+
+// Release the fallback sleep guard once qylock is gone.
+//
+// Both questions this asks cost a process: lockProcessRunning runs pgrep and
+// qylockUnlockGuardActive runs ryoku-host. The sleep cycle is published at
+// login and stays set for the session, so a fixed 100 ms tick meant twenty
+// forks a second from login until logout, for work that is owed once per
+// unlock (#411).
+//
+// It cannot simply stop: a guard that reappears while qylock is not running
+// still has to be released, or it becomes an inhibitor nothing clears and the
+// machine stops suspending. So the tick eases off instead of latching, and
+// anything worth reacting to puts it back to full speed.
 func (d *daemon) releaseQylockUnlockGuardWhenReady() {
-	ticker := time.NewTicker(100 * time.Millisecond)
+	wait := qylockGuardPoll
+	ticker := time.NewTicker(wait)
 	defer ticker.Stop()
+	// Quick again, for whatever just happened.
+	rouse := func() {
+		if wait == qylockGuardPoll {
+			return
+		}
+		wait = qylockGuardPoll
+		ticker.Reset(wait)
+	}
+	// Nothing to do; look a little less often than last time.
+	ease := func() {
+		if wait >= qylockGuardPollMax {
+			return
+		}
+		wait *= 2
+		if wait > qylockGuardPollMax {
+			wait = qylockGuardPollMax
+		}
+		ticker.Reset(wait)
+	}
 	for {
 		select {
 		case <-d.quit:
 			return
+		case <-d.guardKick:
+			rouse()
 		case <-ticker.C:
 			cycle := d.currentSleepCycle()
-			if cycle == nil || !cycle.ready() || !cycle.sessionActive() ||
-				lockProcessRunning() {
+			if cycle == nil || !cycle.ready() || !cycle.sessionActive() {
+				ease()
+				continue
+			}
+			if lockProcessRunning() {
+				// qylock holds its own guard, and the moment it goes is the
+				// one this loop exists for, so stay quick.
+				rouse()
 				continue
 			}
 			session := lockSessionID()
 			if session == "" {
+				ease()
 				continue
 			}
 			unit := "ryoku-qylock-unlock-guard-" + session + ".service"
 			if !qylockUnlockGuardActive(unit) {
+				ease()
 				continue
 			}
+			rouse()
 			if err := qylockUnlockGuardStop(unit); err != nil {
 				log.Printf("ryoku-shell: release qylock unlock sleep guard: %v", err)
 			}

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	wm "ryoku-wm"
 )
@@ -94,6 +95,9 @@ func runAct(args []string) error {
 			return err
 		}
 		return perform(action("ToggleWindowFloating", map[string]any{"id": id}))
+
+	case wm.ActionWindowPlace:
+		return placeWindow(rest)
 
 	case wm.ActionWindowMoveToWorkspace:
 		id, err := argID(rest, 0, "window id")
@@ -191,10 +195,13 @@ func runAct(args []string) error {
 		return perform(action("ToggleOverview", map[string]any{}))
 
 	case wm.ActionNightLightOn:
-		return nightlightStart("gammastep", "-m", "wayland", "-O", strconv.Itoa(nightlightTemp(rest)))
+		// -T must sit strictly above -t or wlsunset refuses the config; the
+		// fixed high keeps the run pinned at the user's temperature (see
+		// nightlightStart).
+		return nightlightStart("wlsunset", "-t", strconv.Itoa(nightlightTemp(rest)), "-T", "30000")
 
 	case wm.ActionNightLightOff:
-		nightlightStop("gammastep")
+		nightlightStop("wlsunset")
 		return nil
 
 	case wm.ActionInputTouchpad:
@@ -267,10 +274,17 @@ func touchpadAct(args []string) error {
 	case "off", "disable":
 		off = true
 	case "toggle":
+		if wm.TouchpadToggleIsEcho(time.Now()) {
+			return nil
+		}
 		off = !off
 	case "restore":
 		// The intent already lives in the config niri watches, so restore only
-		// re-emits it. Silent, since it runs unattended at login.
+		// re-emits it. At login a stored off is named once, so a pad left off is
+		// never a mystery.
+		if off && len(args) > 1 && args[1] == "login" {
+			touchpadNotify("Touchpad is locked off", "Press the touchpad key (Fn+F10 on most laptops) to turn it back on")
+		}
 	default:
 		return fmt.Errorf("act input.touchpad: mode must be on|off|toggle|status|restore, got %q", mode)
 	}
@@ -595,6 +609,100 @@ func focusedWorkspaceID() (uint64, error) {
 	return 0, fmt.Errorf("act %s: no focused workspace", wm.ActionWindowSummon)
 }
 
+// Relative moves avoid niri's working-area origin for absolute positions.
+// The shared placement contract uses output-local client geometry instead.
+func placeWindow(args []string) error {
+	id, x, y, width, height, output, err := windowPlacementArgs(args)
+	if err != nil {
+		return err
+	}
+
+	raw, err := request("Outputs")
+	if err != nil {
+		return fmt.Errorf("act %s: read outputs: %w", wm.ActionWindowPlace, err)
+	}
+	var outputs map[string]niriOutput
+	if err := decode(raw, "Outputs", &outputs); err != nil {
+		return fmt.Errorf("act %s: decode outputs: %w", wm.ActionWindowPlace, err)
+	}
+	target, ok := outputs[output]
+	if !ok {
+		return fmt.Errorf("act %s: output %q does not exist", wm.ActionWindowPlace, output)
+	}
+	if target.Logical == nil {
+		return fmt.Errorf("act %s: output %q is disabled", wm.ActionWindowPlace, output)
+	}
+	if target.Logical.Scale <= 0 {
+		return fmt.Errorf("act %s: output %q reported invalid scale %g", wm.ActionWindowPlace, output, target.Logical.Scale)
+	}
+
+	steps := []struct {
+		label string
+		req   any
+	}{
+		{"make floating", action("MoveWindowToFloating", map[string]any{"id": id})},
+		{"move to output", action("MoveWindowToMonitor", map[string]any{"id": id, "output": output})},
+		{"set width", action("SetWindowWidth", map[string]any{"id": id, "change": map[string]any{"SetFixed": width}})},
+		{"set height", action("SetWindowHeight", map[string]any{"id": id, "change": map[string]any{"SetFixed": height}})},
+	}
+	for _, step := range steps {
+		if err := perform(step.req); err != nil {
+			return fmt.Errorf("act %s: %s window %d: %w", wm.ActionWindowPlace, step.label, id, err)
+		}
+	}
+	windows, err := readWindows()
+	if err != nil {
+		return fmt.Errorf("act %s: read placement geometry: %w", wm.ActionWindowPlace, err)
+	}
+	for _, window := range windows {
+		if window.ID != id {
+			continue
+		}
+		if !window.IsFloating || window.Layout.TilePosInWorkspaceView == nil {
+			return fmt.Errorf("act %s: window %d has no floating geometry", wm.ActionWindowPlace, id)
+		}
+		layout := window.Layout
+		dx := float64(x) - layout.TilePosInWorkspaceView[0] - layout.WindowOffsetInTile[0]
+		dy := float64(y) - layout.TilePosInWorkspaceView[1] - layout.WindowOffsetInTile[1]
+		if err := perform(action("MoveFloatingWindow", map[string]any{
+			"id": id,
+			"x":  map[string]any{"AdjustFixed": dx},
+			"y":  map[string]any{"AdjustFixed": dy},
+		})); err != nil {
+			return fmt.Errorf("act %s: position window %d: %w", wm.ActionWindowPlace, id, err)
+		}
+		return nil
+	}
+	return fmt.Errorf("act %s: window %d does not exist", wm.ActionWindowPlace, id)
+}
+
+func windowPlacementArgs(args []string) (id uint64, x, y, width, height int, output string, err error) {
+	id, err = argID(args, 0, "window id")
+	if err != nil {
+		return
+	}
+	names := []string{"x", "y", "width", "height"}
+	values := []*int{&x, &y, &width, &height}
+	for i := range names {
+		raw, argErr := arg(args, i+1, names[i])
+		if argErr != nil {
+			err = argErr
+			return
+		}
+		*values[i], err = strconv.Atoi(raw)
+		if err != nil {
+			err = fmt.Errorf("act %s: %s must be an integer, got %q", wm.ActionWindowPlace, names[i], raw)
+			return
+		}
+	}
+	if width <= 0 || height <= 0 {
+		err = fmt.Errorf("act %s: width and height must be positive, got %dx%d", wm.ActionWindowPlace, width, height)
+		return
+	}
+	output, err = arg(args, 5, "output name")
+	return
+}
+
 // arg names the missing value, so a bad keybind reports it instead of an index.
 func arg(args []string, i int, name string) (string, error) {
 	if i >= len(args) || strings.TrimSpace(args[i]) == "" {
@@ -644,10 +752,12 @@ func nightlightTemp(args []string) int {
 }
 
 // nightlightStart replaces any running backend with a fresh one warmed to the
-// temperature. gammastep -m wayland -O sets the temperature over
-// wlr-gamma-control and pauses until killed, so it is detached (its own session,
-// stdio to /dev/null, released) to outlive this short-lived invocation; niri
-// restores the gamma when it goes away.
+// temperature. wlsunset with no location computes a polar-night trajectory and
+// sits at its low temperature (-t) until killed, so the night light is exactly
+// as warm as the user set, day or night; the fixed high (-T) only satisfies
+// the validation that high must exceed low. The backend is detached (its own
+// session, stdio to /dev/null, released) to outlive this short-lived
+// invocation; niri restores the gamma when it goes away.
 func nightlightStart(argv ...string) error {
 	nightlightStop(argv[0])
 	null, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)

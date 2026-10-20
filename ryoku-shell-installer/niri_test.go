@@ -8,6 +8,22 @@ import (
 	"testing"
 )
 
+func setDRMStatuses(t *testing.T, statuses map[string]string) {
+	t.Helper()
+	oldRoot := drmSysfsRoot
+	drmSysfsRoot = t.TempDir()
+	t.Cleanup(func() { drmSysfsRoot = oldRoot })
+	for connector, status := range statuses {
+		dir := filepath.Join(drmSysfsRoot, "card1-"+connector)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "status"), []byte(status+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 const niriSample = `
 input {
     keyboard {
@@ -70,6 +86,7 @@ func TestParseNiriOutputs(t *testing.T) {
 }
 
 func TestRenderNiriPins(t *testing.T) {
+	setDRMStatuses(t, map[string]string{"DP-1": "connected"})
 	pins, skipped := renderNiriPins(parseNiriOutputs(niriSample))
 	if len(skipped) != 1 || skipped[0] != "Some Co CoolMonitor 1234" {
 		t.Fatalf("desc name not skipped: %v", skipped)
@@ -80,6 +97,20 @@ func TestRenderNiriPins(t *testing.T) {
 	}
 	if !strings.Contains(pins, `hl.monitor({ output = "eDP-1", disabled = true })`) {
 		t.Fatalf("missing disabled pin:\n%s", pins)
+	}
+}
+
+func TestProtectInternalPanelConnectorKinds(t *testing.T) {
+	setDRMStatuses(t, nil)
+	for _, name := range []string{"eDP-1", "LVDS-1", "DSI-1"} {
+		outs := protectInternalPanel([]niriOutput{{name: name, off: true}})
+		if outs[0].off {
+			t.Errorf("%s stayed disabled without a connected alternative", name)
+		}
+	}
+	external := protectInternalPanel([]niriOutput{{name: "DP-2", off: true}})
+	if !external[0].off {
+		t.Fatal("external output disable must remain unchanged")
 	}
 }
 

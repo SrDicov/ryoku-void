@@ -2,12 +2,15 @@ package updater
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"ryoku-cli/internal/host"
 	"ryoku-cli/internal/ryokumanifest"
 	"ryoku-cli/internal/sys"
 )
@@ -32,12 +35,21 @@ var ManifestPath = func() string {
 // is not a packaged install on a published channel, the fetch failed, and
 // nothing is cached.
 func FetchManifest() (ryokumanifest.Manifest, error) {
-	channel := sys.PackagedChannel()
+	channel := packagedChannel()
+	url := repoReleaseURL(channel)
+	cache := "manifest-" + sanitize(channel) + "-" + string(updatePackageManager()) + ".json"
+	if updatePackageManager() == host.Pacman {
+		channel = sys.PackagedChannel()
+		url = sys.ChannelURL(channel)
+		cache = "manifest-" + sanitize(channel) + ".json"
+	}
 	if channel == "" {
 		return ryokumanifest.Manifest{}, fmt.Errorf("not a packaged channel")
 	}
-	url := sys.ChannelURL(channel) + "/manifest.json"
-	b := fetchCached("manifest-"+sanitize(channel)+".json", url, manifestFetchTTL)
+	if url == "" {
+		return ryokumanifest.Manifest{}, fmt.Errorf("manifest URL for channel %s cannot be expanded", channel)
+	}
+	b := fetchCached(cache, url+"/manifest.json", manifestFetchTTL)
 	if b == nil {
 		return ryokumanifest.Manifest{}, fmt.Errorf("manifest for channel %s unreachable", channel)
 	}
@@ -295,22 +307,116 @@ func Verify(m ryokumanifest.Manifest, installed, explicit, present map[string]bo
 	return r
 }
 
-// PacmanInstalled / PacmanExplicit read the box. They are vars so the
-// reconciler and `ryoku verify` are testable without pacman.
+// PacmanInstalled / PacmanExplicit retain their API names for callers, but
+// read the native package database on both packaged editions.
 var (
-	PacmanInstalled = func() (map[string]bool, error) { return pacmanSet("-Qq") }
-	PacmanExplicit  = func() (map[string]bool, error) { return pacmanSet("-Qqe") }
+	PacmanInstalled = func() (map[string]bool, error) { return packageSet(false) }
+	PacmanExplicit  = func() (map[string]bool, error) { return packageSet(true) }
 )
 
-func pacmanSet(flag string) (map[string]bool, error) {
-	out, err := sys.RunOut("pacman", flag)
+// SatisfiedByProviders widens a name-keyed installed set with the manifest
+// names an installed package already provides under another name. A box that
+// carries rustup, sudo-rs or tuned-ppd has rust, sudo and power-profiles-daemon
+// as far as pacman is concerned, but read by name alone those look never
+// delivered, and installing the stock package over the box's own provider
+// conflicts under --noconfirm, so the converge failed the same way on every
+// update. The shell installer drops these the same way before its install.
+// pacman only: `pacman -T` prints the names nothing satisfies, so every other
+// absent name is present. A failed query leaves the set as it was.
+func SatisfiedByProviders(m ryokumanifest.Manifest, installed map[string]bool) map[string]bool {
+	if updatePackageManager() != host.Pacman {
+		return installed
+	}
+	var absent []string
+	for n := range manifestNames(m) {
+		if !installed[n] {
+			absent = append(absent, n)
+		}
+	}
+	if len(absent) == 0 {
+		return installed
+	}
+	sort.Strings(absent)
+	unmet, err := pacmanUnmet(absent)
 	if err != nil {
-		return nil, fmt.Errorf("pacman %s: %w", flag, err)
+		return installed
+	}
+	widened := make(map[string]bool, len(installed)+len(absent))
+	for n := range installed {
+		widened[n] = true
+	}
+	for _, n := range absent {
+		if !unmet[n] {
+			widened[n] = true
+		}
+	}
+	return widened
+}
+
+// pacmanUnmet returns the names no installed package satisfies. pacman -T
+// exits 127 when any name is unmet and lists those on stdout, so that exit is
+// an answer, not a failure.
+var pacmanUnmet = func(names []string) (map[string]bool, error) {
+	out, err := exec.Command("pacman", append([]string{"-T"}, names...)...).Output()
+	var exit *exec.ExitError
+	if err != nil && !(errors.As(err, &exit) && exit.ExitCode() == 127) {
+		return nil, err
+	}
+	unmet := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			unmet[line] = true
+		}
+	}
+	return unmet, nil
+}
+
+func packageSet(explicit bool) (map[string]bool, error) {
+	manager := updatePackageManager()
+	command := "pacman"
+	args := []string{"-Qq"}
+	switch manager {
+	case host.XBPS:
+		command = "xbps-query"
+		args = []string{"-l"}
+		if explicit {
+			args = []string{"-m"}
+		}
+	case host.DNF:
+		if explicit {
+			command = host.DNFCommand()
+			args = []string{"repoquery", "-y", "--userinstalled", "--queryformat", "%{name}\\n"}
+		} else {
+			// Provides count: the manifest names virtual packages like ppd-service.
+			command = "rpm"
+			args = []string{"-qa", "--qf", "%{NAME}\\n[%{PROVIDENAME}\\n]"}
+		}
+	default:
+		if explicit {
+			args = []string{"-Qqe"}
+		}
+	}
+	out, err := sys.RunOut(command, args...)
+	if err != nil {
+		return nil, fmt.Errorf("%s %s: %w", command, strings.Join(args, " "), err)
 	}
 	set := map[string]bool{}
-	for _, ln := range strings.Split(out, "\n") {
-		if n := strings.TrimSpace(ln); n != "" {
-			set[n] = true
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		name := fields[len(fields)-1]
+		if manager == host.DNF {
+			name = strings.TrimSpace(line) // provides may contain spaces
+		}
+		if manager == host.XBPS {
+			if match := xbpsPkgverPattern.FindStringSubmatch(name); len(match) == 3 {
+				name = match[1]
+			}
+		}
+		if name != "" {
+			set[name] = true
 		}
 	}
 	return set, nil

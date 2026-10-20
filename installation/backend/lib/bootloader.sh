@@ -80,9 +80,13 @@ ryoku_bootloader_finalize() {
   if grep -q '^/+' "$conf"; then
     log "limine-mkinitcpio-hook owns the menu: dropping the flat placeholder entry"
     ryoku_boot_limine_promote "$conf"
+    [[ ${RYOKU_CACHYOS_LAYER_ACTIVE:-0} != 1 ]] \
+      || ryoku_boot_limine_drop_flat "$conf" "/CachyOS Linux"
   elif grep -Eq '^[[:space:]]*//[^/]' "$conf"; then
     log "limine-mkinitcpio-hook adopted the placeholder as the boot tree: repointing the default"
     ryoku_boot_limine_repoint "$conf"
+    [[ ${RYOKU_CACHYOS_LAYER_ACTIVE:-0} != 1 ]] \
+      || ryoku_boot_limine_drop_flat "$conf" "/CachyOS Linux"
   else
     return 0
   fi
@@ -121,8 +125,12 @@ ryoku_bootloader_finalize_alongside() {
     [[ -f $conf ]] || return 0
     if grep -q '^/+' "$conf"; then
       ryoku_boot_limine_promote "$conf"
+      [[ ${RYOKU_CACHYOS_LAYER_ACTIVE:-0} != 1 ]] \
+        || ryoku_boot_limine_drop_flat "$conf" "/CachyOS Linux"
     elif grep -Eq '^[[:space:]]*//[^/]' "$conf"; then
       ryoku_boot_limine_repoint "$conf"
+      [[ ${RYOKU_CACHYOS_LAYER_ACTIVE:-0} != 1 ]] \
+        || ryoku_boot_limine_drop_flat "$conf" "/CachyOS Linux"
     fi
   else
     log "no limine-mkinitcpio-hook in the target (offline or AUR skipped): the flat /Ryoku Linux seed stays bootable at default_entry 1"
@@ -199,6 +207,17 @@ ryoku_boot_limine_promote() {
   ' "$conf" >"$tmp"
   mv "$tmp" "$conf"
   ryoku_limine_autoboot "$conf"
+}
+
+ryoku_boot_limine_drop_flat() {
+  local conf=$1 title=$2 tmp
+  tmp=$(mktemp) || return 1
+  awk -v title="$title" '
+    $0 == title { skip = 1; next }
+    skip && /^[[:space:]]+[^[:space:]]/ { next }
+    { skip = 0; print }
+  ' "$conf" >"$tmp"
+  mv "$tmp" "$conf"
 }
 
 # repoint CONF for the adopted layout: limine-entry-tool 1.37+ keeps the flat
@@ -353,8 +372,8 @@ ryoku_boot_default_limine() {
 # limine hook. shadowing candidates are removed either way.
 ryoku_boot_limine_conf() {
   local mode=$1
-  # variant kernel: cachyos boots linux-cachyos (stock linux stays installed and
-  # the limine hook lists it as fallback); plain boots stock linux.
+  # variant kernel: cachyos boots linux-cachyos (linux-cachyos-lts is installed
+  # too and the limine hook lists it as fallback); plain boots stock linux.
   local kver=linux; [[ ${RYOKU_VARIANT:-plain} == cachyos ]] && kver=linux-cachyos
   # record it: on a live box a kernel package the user added later looks exactly
   # like the one the install was built around, so `ryoku doctor` has nothing to
@@ -384,6 +403,16 @@ ryoku_boot_limine_conf() {
     cmdline: $CMDLINE quiet splash
     module_path: boot():/initramfs-$kver.img
 EOF
+      if [[ ${RYOKU_CACHYOS_LAYER_ACTIVE:-0} == 1 ]]; then
+        cat <<EOF
+
+/CachyOS Linux
+    protocol: linux
+    kernel_path: boot():/vmlinuz-linux-cachyos
+    cmdline: $CMDLINE quiet splash
+    module_path: boot():/initramfs-linux-cachyos.img
+EOF
+      fi
     fi
   } | write_file /mnt/boot/limine.conf
 }
@@ -662,6 +691,16 @@ ryoku_alongside_conf_text() {
     cmdline: $CMDLINE quiet splash
     module_path: fslabel($label):/initramfs-$kver.img
 EOF
+  if [[ ${RYOKU_CACHYOS_LAYER_ACTIVE:-0} == 1 ]]; then
+    cat <<EOF
+
+/CachyOS Linux
+    protocol: linux
+    kernel_path: fslabel($label):/vmlinuz-linux-cachyos
+    cmdline: $CMDLINE quiet splash
+    module_path: fslabel($label):/initramfs-linux-cachyos.img
+EOF
+  fi
   ryoku_alongside_existing_entry "$esp_kind" "$esp_boot" "$esp_partuuid"
 }
 

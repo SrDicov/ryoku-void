@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,15 +22,15 @@ import (
 // setting silently reverting was the hazard of the Hub and the daemon both
 // writing it directly).
 //
-// The daemon owns a typed schema for six top-level namespaces (general, theme,
-// bars, menus, notifications, wallpaper). Those are validated: enum membership
-// and integer ranges are rejected, the float strength/contrast/opacity values
-// clamp into range. Every other top-level key in the file (the Ryoku-native look
-// knobs frameRadius, frameBars, weatherLocation, sidebar panes, language, and the
-// rest) is carried through verbatim as passthrough: echoed in the frame and
-// merged on patch, but not validated, because the daemon has no schema for them.
-// Passthrough keeps the daemon the sole writer without having to model keys other
-// surfaces own.
+// The daemon owns a typed schema for the reference namespaces plus Ryoku's Ask
+// and Controls state. Those are validated: enum membership and integer ranges
+// are rejected, float strength/contrast/opacity values clamp into range, and
+// Controls drops unknown or duplicate layout identifiers. Every other top-level
+// key in the file (the Ryoku-native look knobs frameRadius, frameBars,
+// weatherLocation, language, and the rest) is carried through verbatim as
+// passthrough: echoed in the frame and merged on patch, but not validated,
+// because the daemon has no schema for them. Passthrough keeps the daemon the
+// sole writer without having to model keys other surfaces own.
 //
 // The frame is the whole file as one JSON object, so a subscriber sees both the
 // validated schema and the passthrough keys and can drop its own file reader.
@@ -44,12 +45,18 @@ import (
 // A patch whose first path segment is one of these is validated; anything else is
 // passthrough.
 var contractKeys = map[string]bool{
+	"deckFrost":     true,
 	"general":       true,
 	"theme":         true,
 	"bars":          true,
 	"menus":         true,
 	"notifications": true,
 	"wallpaper":     true,
+	"ask":           true,
+	"phone":         true,
+	"controls":      true,
+	"batteryAlerts": true,
+	"sounds":        true,
 }
 
 // Value domains, in the display order of contract 14 section 8. Stored as stable
@@ -69,6 +76,15 @@ var (
 	matugenModeValues     = []string{"Light", "Dark"}
 	orientationValues     = []string{"Horizontal", "Vertical"}
 	locQueryTypeValues    = []string{"Coordinates", "City"}
+	controlSectionIDs     = []string{"vitals", "connections", "powerProfile", "media", "levels", "bottomControls"}
+	controlElementIDs     = []string{
+		"identity", "cpu", "cpuTemperature", "liveGraph", "memory", "gpu", "network", "disk", "battery",
+		"wifi", "bluetooth", "ethernet", "vpn",
+		"mediaArtwork", "mediaTrack", "mediaTransport",
+		"volume", "brightness",
+		"lock", "sleep", "logout", "restart", "powerOff",
+		"nightLight", "keepAwake", "doNotDisturb", "micMute", "gamingMode", "panelSettings", "pluginCards",
+	}
 
 	// 23 bar widgets, all unit variants (no per-item config).
 	barWidgetValues = []string{
@@ -99,15 +115,21 @@ var (
 )
 
 // settings mirrors the reference configuration schema (contract 14), minus the
-// keys Ryoku has no consumer for (see the slice report): the icon-theme group,
-// the custom-CSS file, and the app-launcher menu.
+// icon-theme group, custom-CSS file, and app-launcher menu that Ryoku does not
+// consume. Ask and Controls are Ryoku's typed shell state.
 type settings struct {
+	DeckFrost     float64               `json:"deckFrost"`
 	General       generalSettings       `json:"general"`
 	Theme         themeSettings         `json:"theme"`
 	Bars          barsSettings          `json:"bars"`
 	Menus         menusSettings         `json:"menus"`
 	Notifications notificationsSettings `json:"notifications"`
 	Wallpaper     wallpaperSettings     `json:"wallpaper"`
+	Ask           askSettings           `json:"ask"`
+	Phone         phoneSettings         `json:"phone"`
+	Controls      controlsSettings      `json:"controls"`
+	BatteryAlerts batteryAlertsSettings `json:"batteryAlerts"`
+	Sounds        soundsSettings        `json:"sounds"`
 }
 
 type generalSettings struct {
@@ -175,7 +197,6 @@ type barsSettings struct {
 }
 
 type frameConfig struct {
-	EnableFrame   bool     `json:"enable_frame"`
 	MonitorFilter []string `json:"monitor_filter"`
 }
 
@@ -241,6 +262,7 @@ type menuWidget struct {
 type notificationsSettings struct {
 	NotificationPosition string `json:"notification_position"`
 	PopupWindowMargins   int    `json:"popup_window_margins"`
+	ShowImages           bool   `json:"show_images"`
 }
 
 type wallpaperSettings struct {
@@ -251,6 +273,97 @@ type wallpaperSettings struct {
 	VideoTranscode      bool   `json:"video_transcode"`
 	VideoTranscodeFps   int    `json:"video_transcode_fps"`
 	VideoTranscodeWidth int    `json:"video_transcode_width"`
+}
+
+type askSettings struct {
+	Bubble askBubbleSettings `json:"bubble"`
+}
+
+type askBubbleSettings struct {
+	Enabled bool    `json:"enabled"`
+	X       float64 `json:"x"`
+	Y       float64 `json:"y"`
+	Screen  string  `json:"screen"`
+}
+type phoneSettings struct {
+	Enabled              bool                    `json:"enabled"`
+	DesktopNotifications bool                    `json:"desktopNotifications"`
+	Contacts             phoneContactsSettings   `json:"contacts"`
+	Scrcpy               phoneScrcpySettings     `json:"scrcpy"`
+	Webcam               phoneWebcamSettings     `json:"webcam"`
+	Microphone           phoneMicrophoneSettings `json:"microphone"`
+	Alarm                phoneAlarmSettings      `json:"alarm"`
+}
+
+type phoneContactsSettings struct {
+	Enabled     bool `json:"enabled"`
+	HideUnnamed bool `json:"hideUnnamed"`
+}
+
+type phoneScrcpySettings struct {
+	Audio          bool                   `json:"audio"`
+	UseWireless    bool                   `json:"useWireless"`
+	AutoWirelessIP bool                   `json:"autoWirelessIp"`
+	WirelessIP     string                 `json:"wirelessIp"`
+	WirelessPort   int                    `json:"wirelessPort"`
+	PinADBPort     bool                   `json:"pinAdbPort"`
+	MaxSize        int                    `json:"maxSize"`
+	MaxFPS         int                    `json:"maxFps"`
+	VideoBitRate   string                 `json:"videoBitRate"`
+	TurnScreenOff  bool                   `json:"turnScreenOff"`
+	StayAwake      bool                   `json:"stayAwake"`
+	ShowTouches    bool                   `json:"showTouches"`
+	ClipboardSync  bool                   `json:"clipboardSync"`
+	KeyboardMode   string                 `json:"keyboardMode"`
+	AutoResume     bool                   `json:"autoResume"`
+	AppMode        phoneAppModeSettings   `json:"appMode"`
+	Recording      phoneRecordingSettings `json:"recording"`
+}
+
+type phoneAppModeSettings struct {
+	ShowAppIcons  bool   `json:"showAppIcons"`
+	AutoUnlock    bool   `json:"autoUnlock"`
+	FlexDisplay   bool   `json:"flexDisplay"`
+	DisplayWidth  int    `json:"displayWidth"`
+	DisplayHeight int    `json:"displayHeight"`
+	DisplayDPI    int    `json:"displayDpi"`
+	OnSessionEnd  string `json:"onSessionEnd"`
+}
+
+type phoneRecordingSettings struct {
+	Folder string `json:"folder"`
+}
+
+type phoneWebcamSettings struct {
+	CameraFacing string `json:"cameraFacing"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	FPS          int    `json:"fps"`
+	VideoDevice  string `json:"videoDevice"`
+}
+
+type phoneMicrophoneSettings struct {
+	Enabled    bool `json:"enabled"`
+	MicGain    int  `json:"micGain"`
+	Monitor    bool `json:"monitor"`
+	SetDefault bool `json:"setDefault"`
+}
+
+type phoneAlarmSettings struct {
+	Enabled        bool     `json:"enabled"`
+	PollMinutes    int      `json:"pollMinutes"`
+	ClockApps      []string `json:"clockApps"`
+	IgnorePackages []string `json:"ignorePackages"`
+}
+
+type controlsSettings struct {
+	Sections []controlsSection `json:"sections"`
+	Hidden   []string          `json:"hidden"`
+}
+
+type controlsSection struct {
+	ID      string `json:"id"`
+	Visible bool   `json:"visible"`
 }
 
 func ip(n int) *int { return &n }
@@ -268,7 +381,16 @@ func defaultSettings() *settings {
 	menu := func(pos string, width int, widgets ...menuWidget) menuConfig {
 		return menuConfig{Position: pos, MinimumWidth: width, Widgets: widgets}
 	}
+	controls := []controlsSection{
+		{ID: "vitals", Visible: true},
+		{ID: "connections", Visible: true},
+		{ID: "powerProfile", Visible: true},
+		{ID: "media", Visible: false},
+		{ID: "levels", Visible: true},
+		{ID: "bottomControls", Visible: true},
+	}
 	return &settings{
+		DeckFrost: 0.45,
 		General: generalSettings{
 			ClockFormat24H:       false,
 			WeatherLocationQuery: locationQuery{Type: "Coordinates", Lat: 0, Lon: 0, Name: "", Country: ""},
@@ -285,7 +407,7 @@ func defaultSettings() *settings {
 			},
 		},
 		Bars: barsSettings{
-			Frame:     frameConfig{EnableFrame: true, MonitorFilter: []string{}},
+			Frame:     frameConfig{MonitorFilter: []string{}},
 			Widgets:   barWidgetsConfig{QuickSettings: quickSettingsWidget{Icon: "Arch"}},
 			TopBar:    horizontalBar{MinimumHeight: 0, RevealByDefault: true, LeftWidgets: []string{}, CenterWidgets: []string{}, RightWidgets: []string{}},
 			BottomBar: horizontalBar{MinimumHeight: 0, RevealByDefault: true, LeftWidgets: []string{}, CenterWidgets: []string{}, RightWidgets: []string{}},
@@ -316,8 +438,30 @@ func defaultSettings() *settings {
 			LeftMenuExpansionType:  "AlwaysExpanded",
 			RightMenuExpansionType: "AlwaysExpanded",
 		},
-		Notifications: notificationsSettings{NotificationPosition: "Right", PopupWindowMargins: 0},
+		Notifications: notificationsSettings{NotificationPosition: "Right", PopupWindowMargins: 0, ShowImages: false},
 		Wallpaper:     wallpaperSettings{ContentFit: "Cover", TransitionPreset: "random", VideoEngine: "ryogami", VideoEnabled: true, VideoTranscodeFps: 24, VideoTranscodeWidth: 1920},
+		Ask:           askSettings{Bubble: askBubbleSettings{Enabled: false, X: 0.94, Y: 0.68, Screen: ""}},
+		Phone: phoneSettings{
+			Enabled: false, DesktopNotifications: true,
+			Contacts: phoneContactsSettings{Enabled: true, HideUnnamed: true},
+			Scrcpy: phoneScrcpySettings{
+				Audio: true, UseWireless: false, AutoWirelessIP: true, WirelessIP: "", WirelessPort: 5555,
+				PinADBPort: false, MaxSize: 0, MaxFPS: 60, VideoBitRate: "8M", TurnScreenOff: false,
+				StayAwake: true, ShowTouches: false, ClipboardSync: true, KeyboardMode: "uhid",
+				AutoResume: true,
+				AppMode: phoneAppModeSettings{
+					ShowAppIcons: true, AutoUnlock: true, FlexDisplay: false,
+					DisplayWidth: 1280, DisplayHeight: 960, DisplayDPI: 240, OnSessionEnd: "home",
+				},
+				Recording: phoneRecordingSettings{Folder: ""},
+			},
+			Webcam:     phoneWebcamSettings{CameraFacing: "back", Width: 1280, Height: 720, FPS: 30, VideoDevice: ""},
+			Microphone: phoneMicrophoneSettings{Enabled: false, MicGain: 100, Monitor: false, SetDefault: false},
+			Alarm:      phoneAlarmSettings{Enabled: true, PollMinutes: 10, ClockApps: []string{}, IgnorePackages: []string{}},
+		},
+		Controls:      controlsSettings{Sections: controls, Hidden: []string{}},
+		BatteryAlerts: batteryAlertsSettings{Enabled: true, WarningEnabled: true, CriticalEnabled: true, WarningPercent: 25, CriticalPercent: 10},
+		Sounds:        defaultSoundsSettings(),
 	}
 }
 
@@ -393,12 +537,18 @@ func (v *validator) barWidgets(path string, ws []string) {
 
 func (s *settings) normalize(strict bool) error {
 	v := &validator{strict: strict}
+	v.clampF(&s.DeckFrost, 0, 1)
 	s.General.normalize(v)
 	s.Theme.normalize(v)
 	s.Bars.normalize(v)
 	s.Menus.normalize(v)
 	s.Notifications.normalize(v)
 	s.Wallpaper.normalize(v)
+	s.Ask.normalize(v)
+	s.Phone.normalize(v)
+	s.Controls.normalize()
+	s.BatteryAlerts.normalize(v)
+	s.Sounds.normalize(v)
 	return v.err
 }
 
@@ -543,6 +693,65 @@ func (w *wallpaperSettings) normalize(v *validator) {
 	// ryoku-shell keeps the key but no longer duplicates the preset name list.
 }
 
+func (a *askSettings) normalize(v *validator) {
+	v.clampF(&a.Bubble.X, 0, 1)
+	v.clampF(&a.Bubble.Y, 0, 1)
+}
+func (p *phoneSettings) normalize(v *validator) {
+	v.rangeI("phone.scrcpy.wirelessPort", &p.Scrcpy.WirelessPort, 1, 65535)
+	v.rangeI("phone.scrcpy.maxSize", &p.Scrcpy.MaxSize, 0, 7680)
+	v.rangeI("phone.scrcpy.maxFps", &p.Scrcpy.MaxFPS, 1, 240)
+	v.nonEmpty("phone.scrcpy.videoBitRate", p.Scrcpy.VideoBitRate)
+	v.enum("phone.scrcpy.keyboardMode", p.Scrcpy.KeyboardMode, []string{"uhid", "sdk"})
+	v.rangeI("phone.scrcpy.appMode.displayWidth", &p.Scrcpy.AppMode.DisplayWidth, 320, 7680)
+	v.rangeI("phone.scrcpy.appMode.displayHeight", &p.Scrcpy.AppMode.DisplayHeight, 320, 7680)
+	v.rangeI("phone.scrcpy.appMode.displayDpi", &p.Scrcpy.AppMode.DisplayDPI, 72, 640)
+	v.enum("phone.scrcpy.appMode.onSessionEnd", p.Scrcpy.AppMode.OnSessionEnd, []string{"home", "continue", "lock"})
+	v.enum("phone.webcam.cameraFacing", p.Webcam.CameraFacing, []string{"front", "back"})
+	v.rangeI("phone.webcam.width", &p.Webcam.Width, 160, 7680)
+	v.rangeI("phone.webcam.height", &p.Webcam.Height, 120, 4320)
+	v.rangeI("phone.webcam.fps", &p.Webcam.FPS, 1, 120)
+	v.rangeI("phone.microphone.micGain", &p.Microphone.MicGain, 0, 200)
+	v.rangeI("phone.alarm.pollMinutes", &p.Alarm.PollMinutes, 1, 1440)
+}
+
+func (c *controlsSettings) normalize() {
+	defaults := defaultSettings().Controls.Sections
+	allowedSections := make(map[string]bool, len(controlSectionIDs))
+	for _, id := range controlSectionIDs {
+		allowedSections[id] = true
+	}
+	seenSections := make(map[string]bool, len(defaults))
+	sections := make([]controlsSection, 0, len(defaults))
+	for _, section := range c.Sections {
+		if !allowedSections[section.ID] || seenSections[section.ID] {
+			continue
+		}
+		seenSections[section.ID] = true
+		sections = append(sections, section)
+	}
+	for _, section := range defaults {
+		if !seenSections[section.ID] {
+			sections = append(sections, section)
+		}
+	}
+	c.Sections = sections
+
+	allowedElements := make(map[string]bool, len(controlElementIDs))
+	for _, id := range controlElementIDs {
+		allowedElements[id] = true
+	}
+	seenElements := make(map[string]bool, len(c.Hidden))
+	hidden := make([]string, 0, len(c.Hidden))
+	for _, id := range c.Hidden {
+		if allowedElements[id] && !seenElements[id] {
+			seenElements[id] = true
+			hidden = append(hidden, id)
+		}
+	}
+	c.Hidden = hidden
+}
+
 // splitPath breaks a dotted patch path into segments, rejecting an empty path or
 // any empty segment (a malformed path such as "a." or "a..b").
 func splitPath(path string) ([]string, error) {
@@ -669,8 +878,8 @@ func settingsToMap(s *settings) map[string]any {
 	return m
 }
 
-// writeContract overlays the six schema namespaces of ns onto full, so a clamped
-// value from normalize is what gets persisted.
+// writeContract overlays the typed schema namespaces of ns onto full, so a
+// clamped or normalized value is what gets persisted.
 func writeContract(full map[string]any, ns *settings) {
 	for k, v := range settingsToMap(ns) {
 		full[k] = v
@@ -699,19 +908,25 @@ func resolveThemePalette(full map[string]any, themeName string) {
 	full["themePalette"] = m
 }
 
-// buildSettings reads the six schema namespaces out of a decoded file, defaulting
-// any that are absent, then normalises. A namespace whose shape does not fit the
-// schema, or a value that fails normalisation, is an error the caller treats as a
-// malformed file (lenient) or a rejected patch (strict).
+// buildSettings reads the typed schema fields out of a decoded file, defaulting
+// any that are absent, then normalises. A field whose shape does not fit the
+// schema, or a value that fails normalisation, is an error the caller treats as
+// a malformed file (lenient) or a rejected patch (strict).
 func buildSettings(raw map[string]any, strict bool) (*settings, error) {
 	s := defaultSettings()
 	dst := map[string]any{
+		"deckFrost":     &s.DeckFrost,
 		"general":       &s.General,
 		"theme":         &s.Theme,
 		"bars":          &s.Bars,
 		"menus":         &s.Menus,
 		"notifications": &s.Notifications,
 		"wallpaper":     &s.Wallpaper,
+		"ask":           &s.Ask,
+		"phone":         &s.Phone,
+		"controls":      &s.Controls,
+		"batteryAlerts": &s.BatteryAlerts,
+		"sounds":        &s.Sounds,
 	}
 	for k, ptr := range dst {
 		raw, ok := raw[k]
@@ -755,6 +970,7 @@ type settingsStore struct {
 	// in the frame beside caps/deadKeys so the Hub's window-rules editor offers
 	// only ids this compositor can apply. Empty when no provider answers.
 	windowRuleActions []string
+	nomarchyLifecycle func(bool) error
 }
 
 func newSettingsStore(path string) *settingsStore {
@@ -762,6 +978,22 @@ func newSettingsStore(path string) *settingsStore {
 	raw, cur, mtime := loadSettingsFile(path)
 	s.raw, s.cur, s.mtime = raw, cur, mtime
 	return s
+}
+
+func nomarchySelectedIn(raw map[string]any) bool {
+	style, _ := raw["barStyle"].(string)
+	return style == "nomarchy"
+}
+
+func (s *settingsStore) reconcileNomarchyStartup() error {
+	s.mu.Lock()
+	active := nomarchySelectedIn(s.raw)
+	lifecycle := s.nomarchyLifecycle
+	s.mu.Unlock()
+	if lifecycle == nil {
+		return nil
+	}
+	return lifecycle(active)
 }
 
 // loadSettingsFile reads the file into the in-memory pair. A missing file yields
@@ -902,16 +1134,25 @@ func lockSettingsFile(path string) (func(), error) {
 	}, nil
 }
 
-const barStyleTransactionKey = "ryoStoreBarStyleTransaction"
+// The markers a Store removal leaves beside the setting it moved to its
+// fallback, so a crashed removal's recovery reverts only its own write.
+const (
+	barStyleTransactionKey = "ryoStoreBarStyleTransaction"
+	dockTransactionKey     = "ryoStoreDockTransaction"
+)
 
-// patch sets one leaf. A schema path is validated and clamped; any other path is
-// passthrough (merged, not validated). The change is persisted before it is
-// committed in memory, so a write failure drops the change rather than leaving
-// memory and disk disagreeing.
+// patch sets one leaf. A schema path is validated and clamped; native
+// passthrough paths are merged without validation. Retired settings namespaces
+// are rejected rather than silently resurrected. The change is persisted before
+// it is committed in memory, so a write failure cannot leave memory and disk
+// disagreeing.
 func (s *settingsStore) patch(path string, value json.RawMessage) error {
 	segs, err := splitPath(path)
 	if err != nil {
 		return err
+	}
+	if segs[0] == "sidebars" {
+		return fmt.Errorf("sidebars settings are retired")
 	}
 	if len(value) == 0 {
 		return fmt.Errorf("missing value")
@@ -937,6 +1178,19 @@ func (s *settingsStore) patch(path string, value json.RawMessage) error {
 	if len(segs) == 1 && segs[0] == "barStyle" {
 		delete(full, barStyleTransactionKey)
 	}
+	// Any dock edit is the user driving the dock now, so the removal's
+	// fallback no longer owns its design.
+	if segs[0] == "dock" {
+		delete(full, dockTransactionKey)
+	}
+	wasNomarchy := nomarchySelectedIn(diskRaw)
+	isNomarchy := nomarchySelectedIn(full)
+	barStyleChanged := len(segs) == 1 && segs[0] == "barStyle" && wasNomarchy != isNomarchy
+	if barStyleChanged && isNomarchy && s.nomarchyLifecycle != nil {
+		if err := s.nomarchyLifecycle(true); err != nil {
+			return err
+		}
+	}
 	newCur := diskCur
 	if contract {
 		ns, err := buildSettings(full, true)
@@ -948,11 +1202,21 @@ func (s *settingsStore) patch(path string, value json.RawMessage) error {
 		newCur = ns
 	}
 	if err := s.persistLocked(full); err != nil {
+		if barStyleChanged && isNomarchy && s.nomarchyLifecycle != nil {
+			if rollbackErr := s.nomarchyLifecycle(wasNomarchy); rollbackErr != nil {
+				log.Printf("ryoku-shell: roll back Nomarchy activation: %v", rollbackErr)
+			}
+		}
 		return err
 	}
 	s.raw = full
 	s.cur = newCur
 	s.notify(s.frameLocked())
+	if barStyleChanged && !isNomarchy && s.nomarchyLifecycle != nil {
+		if err := s.nomarchyLifecycle(false); err != nil {
+			log.Printf("ryoku-shell: Nomarchy deactivation after bar-style change: %v", err)
+		}
+	}
 	return nil
 }
 
@@ -1024,20 +1288,40 @@ func (s *settingsStore) reload() {
 			badFile = true
 		}
 	}
-	s.mu.Lock()
-	if fi, e := os.Stat(s.path); e == nil {
-		s.mtime = fi.ModTime()
+	if !badFile {
+		writeContract(raw, cur)
+		resolveThemePalette(raw, cur.Theme.Theme)
 	}
+	s.mu.Lock()
 	if badFile {
+		if fi, e := os.Stat(s.path); e == nil {
+			s.mtime = fi.ModTime()
+		}
 		s.mu.Unlock()
 		return
 	}
-	writeContract(raw, cur)
-	resolveThemePalette(raw, cur.Theme.Theme)
+	wasNomarchy := nomarchySelectedIn(s.raw)
+	isNomarchy := nomarchySelectedIn(raw)
+	barStyleChanged := wasNomarchy != isNomarchy
+	if barStyleChanged && isNomarchy && s.nomarchyLifecycle != nil {
+		if err := s.nomarchyLifecycle(true); err != nil {
+			s.mu.Unlock()
+			log.Printf("ryoku-shell: activate Nomarchy after settings reload: %v", err)
+			return
+		}
+	}
+	if fi, e := os.Stat(s.path); e == nil {
+		s.mtime = fi.ModTime()
+	}
 	s.raw, s.cur = raw, cur
 	frame := s.frameLocked()
 	s.mu.Unlock()
 	s.notify(frame)
+	if barStyleChanged && !isNomarchy && s.nomarchyLifecycle != nil {
+		if err := s.nomarchyLifecycle(false); err != nil {
+			log.Printf("ryoku-shell: deactivate Nomarchy after settings reload: %v", err)
+		}
+	}
 }
 
 // settingsPollInterval is how often the watcher checks the file's mtime. The file
@@ -1074,6 +1358,10 @@ func (s *settingsStore) watch(quit <-chan struct{}) {
 // every patch, reset, or external edit.
 func (d *daemon) startSettings() {
 	store := newSettingsStore(filepath.Join(ryokuConfigDir(), "shell.json"))
+	store.nomarchyLifecycle = setNomarchyActive
+	if err := store.reconcileNomarchyStartup(); err != nil {
+		log.Printf("ryoku-shell: reconcile Nomarchy at startup: %v", err)
+	}
 	d.settings = store
 	t := d.registerTopic("settings")
 
@@ -1113,6 +1401,8 @@ func (d *daemon) startSettings() {
 	// hardcode). Off the hot path, best-effort.
 	go applyFont(frame)
 
+	d.registerBatteryAlertsCalls()
+	d.registerSoundCalls()
 	d.registerCall("settings.patch", func(raw json.RawMessage) (any, error) {
 		var a struct {
 			Path  string          `json:"path"`

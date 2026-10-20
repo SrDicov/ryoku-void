@@ -1,0 +1,126 @@
+#!/bin/sh
+# Runit has no dependency graph, so callers use bounded prerequisite waits.
+
+# Reload Turnstile's envdir to observe values published after runsv started.
+load_session_env() {
+	[ -n "${TURNSTILE_ENV_DIR:-}" ] || return 0
+	[ -d "$TURNSTILE_ENV_DIR" ] || return 0
+
+	for _ryoku_env_file in "$TURNSTILE_ENV_DIR"/*; do
+		[ -f "$_ryoku_env_file" ] || continue
+		_ryoku_env_name=${_ryoku_env_file##*/}
+		case $_ryoku_env_name in
+			""|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
+		esac
+		_ryoku_env_value=$(cat "$_ryoku_env_file") || continue
+		export "$_ryoku_env_name=$_ryoku_env_value"
+	done
+}
+
+wait_budget() {
+	_budget=${1:-30}
+	_scale=${RYOKU_WAIT_BUDGET_SCALE:-1}
+	if [ "$_scale" -le 0 ] 2>/dev/null; then
+		echo 0
+		return
+	fi
+	echo $((_budget * _scale))
+}
+
+_wait_failed() {
+	_wait_actual_budget=$(wait_budget "$4")
+	printf '%s\n' "wait-for: $1 $2 $3 after ${_wait_actual_budget}s; parking" >&2
+	return 1
+}
+
+wait_poll() {
+	_deadline=$(( $(date +%s) + $(wait_budget "$1") ))
+	shift
+	while :; do
+		"$@" >/dev/null 2>&1 && return 0
+		[ "$(date +%s)" -ge "$_deadline" ] && return 1
+		sleep 0.2
+	done
+}
+
+# Prefer Turnstile's live envdir over the inherited environment.
+wait_env() {
+	if wait_poll "$2" _wait_env_once "$1"; then
+		return 0
+	fi
+	_wait_failed environment "$1" "not set" "$2"
+}
+
+_wait_env_once() {
+	case $1 in
+		""|[0-9]*|*[!A-Za-z0-9_]*) return 1 ;;
+	esac
+	if [ -n "${TURNSTILE_ENV_DIR:-}" ]; then
+		[ -s "$TURNSTILE_ENV_DIR/$1" ]
+		return
+	fi
+	eval "_ryoku_env_value=\${$1:-}"
+	[ -n "$_ryoku_env_value" ]
+}
+
+wait_file() {
+	case $1 in
+		!*)
+			if wait_poll "$2" sh -c "[ ! -e \"${1#!}\" ]"; then
+				return 0
+			fi
+			;;
+		*)
+			if wait_poll "$2" sh -c "[ -e \"$1\" ]"; then
+				return 0
+			fi
+			;;
+	esac
+	_wait_failed file "$1" "not ready" "$2"
+}
+
+wait_dbus() {
+	if wait_poll "$2" _wait_dbus_once "$1"; then
+		return 0
+	fi
+	_wait_failed "D-Bus name" "$1" "not owned" "$2"
+}
+
+_wait_dbus_once() {
+	if command -v busctl >/dev/null 2>&1; then
+		busctl --user status "$1" >/dev/null 2>&1 && return 0
+		busctl status "$1" >/dev/null 2>&1 && return 0
+		return 1
+	fi
+	# A session socket is the best available readiness signal without busctl.
+	[ -S "${DBUS_SESSION_BUS_ADDRESS#unix:path=}" ] || [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus" ]
+}
+
+# Prefer user services when a same-named system service also exists.
+wait_service() {
+	if wait_poll "$2" _wait_service_once "$1"; then
+		return 0
+	fi
+	_wait_failed service "$1" "not up" "$2"
+}
+
+_wait_service_once() {
+	for _dir in "../$1" "${RYOKU_USER_SERVICE_DIR:+$RYOKU_USER_SERVICE_DIR/$1}" "/var/service/$1" "/etc/sv/$1"; do
+		[ -n "$_dir" ] || continue
+		if [ -d "$_dir/supervise" ]; then
+			_state=$(cat "$_dir/supervise/stat" 2>/dev/null) || continue
+			case $_state in
+				run*|finish*) return 0 ;;
+			esac
+			return 1
+		fi
+	done
+	return 1
+}
+
+# Missing binaries would make runsv retry every second, so callers park instead.
+require_bin() {
+	[ -x "$1" ] && return 0
+	echo "missing $1; parked until it is installed"
+	return 1
+}

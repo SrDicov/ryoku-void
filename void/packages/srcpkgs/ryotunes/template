@@ -1,0 +1,59 @@
+# Template file for 'ryotunes'
+pkgname=ryotunes
+version=1.2.1
+revision=1
+archs="x86_64"
+build_style=cargo
+hostmakedepends="pkg-config"
+makedepends="gtk+3-devel libwebkit2gtk41-devel mpv-devel openssl-devel"
+depends="desktop-file-utils ffmpeg6 gtk+3 hicolor-icon-theme libayatana-appindicator
+ libwebkit2gtk41 librsvg mpv openssl polkit qt6-imageformats qt6-plugin-tls-openssl
+ quickshell xdg-utils yt-dlp"
+short_desc="Ryoku music client, playback daemon, and sync server"
+maintainer="Ryoku <releases@ryoku.dev>"
+license="GPL-3.0-or-later"
+homepage="https://github.com/Ryoku-dev/ryotunes"
+distfiles="${homepage}/releases/download/v${version}/ryotunes-${version}.tar.gz"
+checksum=36be6f5891acc74df35681b9927e4202867dd2f1d29824188ec42c8d7311a5d5
+nocross=yes
+
+# The repository build stamps version and checksum with Ryotunes' latest
+# release (void/packages/repo/container-runner.sh); the values above are only
+# the last release seen here.
+# Linux uses this binary to ask ryotunesd to open the installed QML client; it never runs Tauri.
+# Building without default features avoids bundling the unused web frontend.
+do_build() {
+	cargo build --release --locked --target "${RUST_TARGET}" \
+		--package ryotunes --bin ryotunes --no-default-features
+	cargo build --release --locked --target "${RUST_TARGET}" \
+		--package sync-server --package ryotunesd --package ryotunes-cli
+}
+
+do_install() {
+	local binaries="target/${RUST_TARGET}/release"
+
+	vbin "${binaries}/ryotunes"
+	vbin "${binaries}/ryotunes-sync"
+	vbin "${binaries}/ryotunesd"
+	vbin "${binaries}/ryotunes-cli"
+	vbin packaging/linux/ryotunes-qml
+	vbin "${FILESDIR}/ryotunes-diagnostics"
+
+	vmkdir usr/share/ryotunes
+	vcopy client usr/share/ryotunes
+	rm -rf "${DESTDIR}/usr/share/ryotunes/client/tests"
+	vcopy skins usr/share/ryotunes
+	vinstall matugen/ryotunes.json 644 usr/share/ryotunes/matugen
+
+	vinstall packaging/linux/ryotunes.desktop 644 usr/share/applications
+	vinstall packaging/linux/dev.ryoku.ryotunes.metainfo.xml 644 usr/share/metainfo
+	vinstall src-tauri/icons/32x32.png 644 usr/share/icons/hicolor/32x32/apps ryotunes.png
+	vinstall src-tauri/icons/64x64.png 644 usr/share/icons/hicolor/64x64/apps ryotunes.png
+	vinstall src-tauri/icons/128x128.png 644 usr/share/icons/hicolor/128x128/apps ryotunes.png
+	vinstall src-tauri/icons/128x128@2x.png 644 usr/share/icons/hicolor/256x256/apps ryotunes.png
+	vinstall src-tauri/icons/icon.png 644 usr/share/icons/hicolor/512x512/apps ryotunes.png
+
+	vlicense LICENSE
+	vdoc README.md
+	vdoc UPSTREAM.md
+}

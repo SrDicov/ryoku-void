@@ -1,0 +1,23 @@
+# Template file for 'qmk_hid'
+pkgname=qmk_hid
+version=0.1.11
+revision=1
+archs="x86_64"
+create_wrksrc=yes
+skip_extraction="qmk_hid_linux_v${version}.zip LICENSE.md"
+hostmakedepends="unzip"
+short_desc="Framework QMK keyboard HID command utility"
+maintainer="Ryoku <releases@ryoku.dev>"
+license="BSD-3-Clause"
+homepage="https://github.com/FrameworkComputer/qmk_hid"
+distfiles="${homepage}/releases/download/v${version}/qmk_hid_linux_v${version}.zip
+ ${homepage}/raw/v${version}/LICENSE.md"
+checksum="57460728df3777d0abd2f2b464dea898c1fdc1cc6524ede1c2854fa9c8f027dc
+ 59077079599cf038c21c913cdc2f1d80829a5f237736e1182d6e98e6f4a8d627"
+
+
+do_install() {
+	unzip -q "${XBPS_SRCDISTDIR}/${pkgname}-${version}/qmk_hid_linux_v${version}.zip"
+	vbin qmk_hid
+	vlicense "${XBPS_SRCDISTDIR}/${pkgname}-${version}/LICENSE.md"
+}

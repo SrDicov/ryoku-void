@@ -28,6 +28,8 @@ var niriTransform = map[string]int{
 	"flipped": 4, "flipped-90": 5, "flipped-180": 6, "flipped-270": 7,
 }
 
+var drmSysfsRoot = "/sys/class/drm"
+
 var niriIncludeRe = regexp.MustCompile(`(?m)^\s*include\s+(?:optional=true\s+)?"([^"]+)"`)
 
 // stripKdl drops // line comments and /- commented nodes (cachyos ships its
@@ -176,6 +178,67 @@ func (o niriOutput) meaningful() bool {
 	return o.off || o.mode != "" || o.position != "" || o.transform != 0 || o.scale != "" || o.vrr > 0
 }
 
+func internalConnector(name string) bool {
+	name = strings.ToLower(name)
+	return name == "edp" || strings.HasPrefix(name, "edp-") ||
+		name == "lvds" || strings.HasPrefix(name, "lvds-") ||
+		name == "dsi" || strings.HasPrefix(name, "dsi-")
+}
+
+func connectedDRMConnector(entries []os.DirEntry, name string) bool {
+	suffix := "-" + name
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "card") || !strings.HasSuffix(entry.Name(), suffix) {
+			continue
+		}
+		status, err := os.ReadFile(filepath.Join(drmSysfsRoot, entry.Name(), "status"))
+		if err == nil && strings.TrimSpace(string(status)) == "connected" {
+			return true
+		}
+	}
+	return false
+}
+
+// protectInternalPanel refuses to carry a laptop panel's disabled state unless
+// the salvaged layout has another output that is physically connected now.
+func protectInternalPanel(outs []niriOutput) []niriOutput {
+	hasDisabledInternal := false
+	for _, o := range outs {
+		if o.off && internalConnector(o.name) {
+			hasDisabledInternal = true
+			break
+		}
+	}
+	if !hasDisabledInternal {
+		return outs
+	}
+
+	entries, _ := os.ReadDir(drmSysfsRoot)
+	for _, o := range outs {
+		if o.off {
+			continue
+		}
+		sameAsDisabledInternal := false
+		for _, disabled := range outs {
+			if disabled.off && internalConnector(disabled.name) && disabled.name == o.name {
+				sameAsDisabledInternal = true
+				break
+			}
+		}
+		if !sameAsDisabledInternal && connectedDRMConnector(entries, o.name) {
+			return outs
+		}
+	}
+
+	safe := append([]niriOutput(nil), outs...)
+	for i := range safe {
+		if safe[i].off && internalConnector(safe[i].name) {
+			safe[i].off = false
+		}
+	}
+	return safe
+}
+
 // parseNiriXkb pulls layout/variant/options from the xkb block. a keymap
 // file overrides all fields, so hasFile means don't salvage.
 func parseNiriXkb(text string) (layout, variant, options string, hasFile bool) {
@@ -212,6 +275,7 @@ func renderNiriPins(outs []niriOutput) (pins string, skipped []string) {
 // can't be matched to a connector and come back in skipped, except for the
 // hyprland source whose desc: pins translate 1:1 (allowDesc).
 func renderPins(outs []niriOutput, allowDesc bool, source string) (pins string, skipped []string) {
+	outs = protectInternalPanel(outs)
 	var b strings.Builder
 	wrote := false
 	for _, o := range outs {
@@ -261,6 +325,7 @@ func renderPins(outs []niriOutput, allowDesc bool, source string) (pins string, 
 // value it cannot express is left out and niri decides, which is better than
 // pinning a mode the panel may not have.
 func renderKdlPins(outs []niriOutput, allowDesc bool, source string) (pins string, skipped []string) {
+	outs = protectInternalPanel(outs)
 	var b strings.Builder
 	wrote := false
 	for _, o := range outs {

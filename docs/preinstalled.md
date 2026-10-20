@@ -15,6 +15,10 @@ image) the CachyOS performance layer. All told, a fresh box lands at roughly
 ## How the default set is assembled
 
 Nothing here is magic; it comes from four well-defined places, in this order.
+The installer's window-manager, browser, and apps steps (see
+`installation/tui/apps.go`) can remove entries from the default set: what you
+drop is filtered out of every step below and recorded so `ryoku update` never
+puts it back.
 
 1. **`pacstrap`** lays down the base system from `system/packages/base.packages`,
    the developer toolchains from `dev.packages`, and the microcode for your CPU
@@ -36,20 +40,22 @@ this page is the readable tour.
 
 ## The Ryoku desktop itself
 
-These are Ryoku's own packages, built from this monorepo and served from the
-`[ryoku]` repo. The `ryoku-desktop` umbrella version-pins them all so a partial
-upgrade never leaves the shell QML running against a stale plugin.
+These are Ryoku's own packages and default applications, served from the
+`[ryoku]` repo. Most build from this monorepo; pinned upstream apps such as
+RyoManager follow the same signed update path. The `ryoku-desktop` umbrella
+version-pins the desktop components so a partial upgrade never leaves the shell
+QML running against a stale plugin.
 
 | Package | What it is |
 |---|---|
 | `ryoku-shell` | The Quickshell desktop: bar, pill, launcher, overview, wallpaper, visualizer, ryoshot capture, and the lock screen |
 | `ryoku-hub` | Ryoku Settings, the control center (Appearance, Animations, Displays, Connections, GPU, Keybinds, and the rest) |
 | `ryoku` | The `ryoku` CLI: `update`, `doctor`, `materialize`, rollback, snapshots |
-| `ryoku-rashin` | The system-map vault that keeps a live map of where everything lives |
+| `ryoku-rashin` | Rashin, the AI agent: the system-map vault, Ask, the Rashin window and the bar's AI usage pill. Installed by default but optional: untick it in the installer's Apps & tools, or remove it later, and Ryoku does not put it back |
 | `ryoku-blobs` | The shared `Ryoku.Blobs` QML plugin |
 | `gpk` | GlazePKG, the RyokuArch package manager |
 | `ryogami` | The wallpaper daemon the shell drives: static, live, and shader transitions |
-| `ryomotion` | The screen-demo recorder and editor |
+| `ryomanager` | RyoManager, the system monitor and process manager. It is selected by default in the installer and can be removed without doctor putting it back |
 | `ryostore` | RyoStore: the catalogue of rices, bundles, and bar styles |
 | `ryowalls` | The wallpaper browser, preview, and AI enhancer |
 | `ryovm` | The virtual-machine manager |
@@ -61,6 +67,10 @@ upgrade never leaves the shell QML running against a stale plugin.
 | `limine-mkinitcpio-hook`, `limine-snapper-sync` | Boot-menu regeneration and the snapshots submenu |
 
 `ryoshot` (the screenshot studio) and the launcher live inside `ryoku-shell`.
+
+The desktop package also includes two ready-to-apply rices: **Default** and
+**NOC**. Each carries its own wallpaper, preview, shell look, and Fastfetch
+style.
 
 ## Core system and boot
 
@@ -129,7 +139,7 @@ The small daemons and utilities the desktop leans on every session.
 
 | Package | Role |
 |---|---|
-| `chromium` | The web browser |
+| `firefox` / `chromium` / Zen (`zen-browser-bin`) | The web browser: the installer picks exactly one of the three, with Firefox recommended, or none at all |
 | `kitty` | The default terminal |
 | `mpv`, `mpv-mpris` | The media player, wired onto the players bus |
 | `nautilus`, `nautilus-python` | The file manager and its "Install / Compress / Send with Ryoku" right-click actions |
@@ -147,9 +157,9 @@ The command line Ryoku hands you is already comfortable.
 
 | Package | Kind | Role |
 |---|---|---|
-| `fish` | Shell | The default account shell |
-| `bash`, `zsh` | Shell | Account-wide alternatives selectable in Ryoku Settings |
-| `blesh` | Shell | Fish-like highlighting and suggestions for Bash |
+| `fish` | Shell | The recommended account shell |
+| `bash` | Shell | Account-wide alternative with `blesh` highlighting and suggestions |
+| `zsh` | Shell | Account-wide alternative with Ryoku Oh My Zsh |
 | `zsh-autosuggestions`, `zsh-syntax-highlighting`, `zsh-history-substring-search` | Shell | Fish-like editing for Zsh |
 | `starship` | Prompt | The shared prompt |
 | `bash-completion` | CLI | Bash completions |
@@ -180,7 +190,7 @@ Tools the desktop, the pill, and the capture stack shell out to by name.
 | `hyprpicker` | The color picker |
 | `imagemagick` | Image processing |
 | `waifu2x-ncnn-vulkan` | The GPU AI upscaler behind ryoshot's HD export and ryowalls' Enhance |
-| `openrgb` | Per-device keyboard and mouse lighting, configurable from Settings > Appearance > Lighting |
+| `openrgb` | Per-device keyboard, mouse, RAM and motherboard lighting that follows the wallpaper palette, configurable from the wallpaper picker (Super + W) > Settings > Lighting |
 | `asusctl` | Native built-in Aura keyboard lighting on supported ASUS laptops; selected by hardware rather than installed everywhere |
 | `ddcutil` | External-monitor brightness over DDC/CI (the pill's DISPLAY faders) |
 | `ffmpeg`, `yt-dlp` | Media transcode and download; also the launcher's live-radio play path |
@@ -194,8 +204,8 @@ Everything behind the pill's Super+D, Super+U, and voice tools.
 |---|---|
 | `tesseract`, `tesseract-data-eng` | OCR text grab |
 | `zbar` | QR-code scanning |
-| `gpu-screen-recorder`, `wf-recorder` | Hardware screen recording, with a multi-GPU fallback |
-| `hyprsunset` | The night-light color-temperature toggle |
+| `gpu-screen-recorder` | GPU-only screen capture and encode, replay-capable, on every compositor |
+| `hyprsunset` (Hyprland), `wlsunset` (niri) | The night-light color-temperature toggle: each variant ships its compositor's gamma backend |
 | `wtype` | Types voice-dictation output into the focused app |
 | `libqalculate` | The launcher's calculator backend |
 | `songrec` | The launcher's Recognize Music |
@@ -227,16 +237,25 @@ default.
 ## The CachyOS layer (CachyOS image only)
 
 Install from the CachyOS ISO and a Ryoku box *is* a CachyOS box: these are
-pacstrapped on top of everything above.
+pacstrapped on top of everything above. CachyOS's own builds replace Arch's
+wherever CachyOS forks a package (pacman, mesa, the firmware), and the stock
+`linux` kernel is left out. The first update moves a CPU with an optimized
+CachyOS tier (x86-64-v3, v4 or Zen 4) onto that tier's builds.
 
 | Package | Role |
 |---|---|
 | `linux-cachyos`, `linux-cachyos-headers` | The CachyOS-optimized kernel (booted by default) and its headers |
+| `linux-cachyos-lts`, `linux-cachyos-lts-headers` | The CachyOS LTS kernel, the fallback boot entry in place of stock `linux` |
 | `cachyos-settings` | The performance tuning (sysctl, udev, modprobe, systemd) |
 | `ananicy-cpp`, `cachyos-ananicy-rules` | The auto-nice daemon that keeps the compositor responsive under load |
 | `scx-scheds` | The sched-ext userspace schedulers |
 | `proton-cachyos-slr` | The CachyOS-tuned Proton build for Steam and Lutris |
 | `cachyos-keyring`, `cachyos-mirrorlist`, `cachyos-v3-mirrorlist`, `cachyos-v4-mirrorlist` | Trust and mirrors, so the installed system keeps updating from CachyOS |
+| `cachyos-rate-mirrors` | Ranks the Arch and CachyOS mirrors |
+| `yay` | The AUR helper, from `[cachyos]` in place of the AUR's `yay-bin` |
+| `zlib-ng-compat`, `lib32-zlib-ng-compat` | CachyOS's zlib, which it marks as replacing Arch's, so the first update has nothing to swap |
+| `cachyos-hooks`, `chwd` | CachyOS's pacman hooks and hardware detection tool |
+| `cachyos-kernel-manager`, `cachyos-packageinstaller`, `btrfs-assistant` | CachyOS's kernel manager, its package installer, and the Btrfs snapshot GUI |
 
 ## CPU microcode (per profile)
 
@@ -255,12 +274,13 @@ for the card they detect.
 
 These build in the post-install step. They need a network, so they're
 best-effort: a fresh box comes up fine without them and they arrive on the next
-pass.
+pass. On the CachyOS image, `yay` and the Zen browser come from the CachyOS
+repositories instead.
 
 | Package | Role |
 |---|---|
 | `yay-bin` | The AUR helper, bootstrapped first so the rest can build |
-| `voxtype-bin` | The offline Whisper voice-dictation daemon (pill Super+`) |
+| `voxtype-bin` | The Whisper voice-dictation daemon with curated local English and multilingual models (pill Super+`) |
 | `localsend-bin` | AirDrop-style LAN file sharing, spoken by the file stash |
 | `nvibrant-bin` | NVIDIA digital vibrance for the pill's saturation fader |
 | `game-devices-udev` | udev rules and battery reporting for DualSense and Switch Pro pads |

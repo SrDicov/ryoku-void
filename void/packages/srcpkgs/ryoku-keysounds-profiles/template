@@ -1,0 +1,31 @@
+# Template file for 'ryoku-keysounds-profiles'
+pkgname=ryoku-keysounds-profiles
+version=0.1.0
+revision=1
+archs="x86_64"
+hostmakedepends="git python3 ffmpeg6"
+short_desc="Ryoku key-sound sample profiles and the Mechvibes importer"
+maintainer="Ryoku <releases@ryoku.dev>"
+license="GPL-3.0-or-later"
+homepage="https://ryoku.dev"
+distfiles="https://repo.ryoku.dev/sources/ryoku-${version}.tar.gz"
+checksum=SKIP
+wrksrc="ryoku-${version}"
+
+_payload() {
+	RYOKU_SRC="$wrksrc" \
+	RYOKU_BUILD_DIR="${wrksrc%/*}/${pkgname}-payload-build" \
+	RYOKU_PKGVER="$version" \
+	RYOKU_RELEASE="$version" \
+	RYOKU_CHANNEL="${RYOKU_CHANNEL:-stable}" \
+	RYOKU_NAME="${RYOKU_NAME:-Ryoku}" \
+		"$wrksrc/release/packages/$pkgname/payload.sh" "$@"
+}
+
+do_build() {
+	_payload build
+}
+
+do_install() {
+	_payload install "$DESTDIR" runit
+}

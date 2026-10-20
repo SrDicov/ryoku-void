@@ -1,0 +1,33 @@
+# Template file for 'localsend-bin'
+pkgname=localsend-bin
+version=1.18.2
+revision=1
+archs="x86_64"
+create_wrksrc=yes
+skip_extraction="LocalSend-${version}-linux-x86-64.deb LICENSE"
+hostmakedepends="libarchive"
+depends="fuse xdg-user-dirs libayatana-appindicator libayatana-indicator"
+short_desc="Cross-platform local network file sharing"
+maintainer="Ryoku <releases@ryoku.dev>"
+license="Apache-2.0"
+homepage="https://github.com/localsend/localsend"
+distfiles="${homepage}/releases/download/v${version}/LocalSend-${version}-linux-x86-64.deb
+ ${homepage}/raw/v${version}/LICENSE"
+checksum="cc42a4f3eacdcb25ec31f0016b1272acb003145ab30484db8965450e20c72cd2
+ 38514afa30358fc21ef37551f3119b27d820427ece3c6f0ae014c7e47338c087"
+nostrip=yes
+provides="localsend-${version}_${revision}"
+conflicts="localsend>=0"
+
+
+do_install() {
+	bsdtar -xf "${XBPS_SRCDISTDIR}/${pkgname}-${version}/LocalSend-${version}-linux-x86-64.deb" data.tar.zst
+	bsdtar -xf data.tar.zst
+	vmkdir opt
+	vcopy opt/localsend_app opt
+	vmkdir usr/bin
+	ln -s /opt/localsend_app/localsend_app "${DESTDIR}/usr/bin/localsend_app"
+	vcopy usr/share/applications usr/share
+	vcopy usr/share/icons usr/share
+	vlicense "${XBPS_SRCDISTDIR}/${pkgname}-${version}/LICENSE"
+}

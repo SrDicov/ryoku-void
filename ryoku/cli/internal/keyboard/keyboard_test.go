@@ -3,6 +3,7 @@ package keyboard
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -80,6 +81,80 @@ func TestLayoutPrimary(t *testing.T) {
 	}
 	if got := (Layout{}).Primary(); got != "" {
 		t.Errorf("empty Primary() = %q, want empty", got)
+	}
+}
+
+func TestRebuildBootImageSelectsHostGenerator(t *testing.T) {
+	oldHas, oldRun := hasBootImageTool, runBootImageTool
+	t.Cleanup(func() {
+		hasBootImageTool, runBootImageTool = oldHas, oldRun
+	})
+
+	var command string
+	var args []string
+	runBootImageTool = func(got ...string) error {
+		if len(got) == 0 {
+			t.Fatal("boot rebuild ran an empty command")
+		}
+		command = got[0]
+		args = append([]string(nil), got[1:]...)
+		return nil
+	}
+
+	t.Run("mkinitcpio is preferred", func(t *testing.T) {
+		command, args = "", nil
+		hasBootImageTool = func(string) bool { return true }
+		if err := RebuildBootImage(); err != nil {
+			t.Fatal(err)
+		}
+		if command != "mkinitcpio" || strings.Join(args, " ") != "-P" {
+			t.Fatalf("rebuild command = %q %q", command, args)
+		}
+	})
+
+	t.Run("dracut is the fallback", func(t *testing.T) {
+		command, args = "", nil
+		hasBootImageTool = func(name string) bool { return name == "dracut" }
+		if err := RebuildBootImage(); err != nil {
+			t.Fatal(err)
+		}
+		if command != "dracut" || strings.Join(args, " ") != "--regenerate-all --force" {
+			t.Fatalf("rebuild command = %q %q", command, args)
+		}
+	})
+
+	t.Run("missing generators name both tools", func(t *testing.T) {
+		hasBootImageTool = func(string) bool { return false }
+		err := RebuildBootImage()
+		if err == nil || !strings.Contains(err.Error(), "mkinitcpio") || !strings.Contains(err.Error(), "dracut") {
+			t.Fatalf("missing generator error = %v", err)
+		}
+	})
+}
+
+func TestApplySystemDelegatesToHostKeymap(t *testing.T) {
+	old := applySystemKeymap
+	t.Cleanup(func() { applySystemKeymap = old })
+	var layout, variant, options string
+	applySystemKeymap = func(gotLayout, gotVariant, gotOptions string) int {
+		layout, variant, options = gotLayout, gotVariant, gotOptions
+		return 0
+	}
+
+	if err := ApplySystem(Layout{Layout: "de,us", Variant: "nodeadkeys", Options: "ctrl:nocaps"}); err != nil {
+		t.Fatal(err)
+	}
+	if layout != "de" || variant != "nodeadkeys" || options != "ctrl:nocaps" {
+		t.Fatalf("host keymap args = %q %q %q", layout, variant, options)
+	}
+}
+
+func TestApplySystemReportsHostFailure(t *testing.T) {
+	old := applySystemKeymap
+	t.Cleanup(func() { applySystemKeymap = old })
+	applySystemKeymap = func(string, string, string) int { return 1 }
+	if err := ApplySystem(Layout{Layout: "fr"}); err == nil {
+		t.Fatal("host keymap failure was ignored")
 	}
 }
 

@@ -1,0 +1,35 @@
+# void-mklive supplies the base; the installed desktop comes from the ISO repository.
+
+parted
+gptfdisk
+btrfs-progs
+dosfstools
+e2fsprogs
+cryptsetup
+ntfs-3g
+efibootmgr
+limine
+lvm2
+mdadm
+xtools-minimal
+
+NetworkManager
+iwd
+wpa_supplicant
+wireless-regdb
+
+cage
+foot
+seatd
+dbus
+elogind
+# The installer session asks foot for this exact family.
+ttf-jetbrains-mono-nerd
+kbd
+
+bash
+curl
+jq
+sudo
+pciutils
+openssl

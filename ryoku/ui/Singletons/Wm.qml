@@ -6,27 +6,25 @@ import Quickshell.Io
 import Quickshell.WindowManager
 import Quickshell.Wayland
 
-// Capability-shaped view of the window manager. Presentation lists come from the
-// Wayland protocols (ext-workspace-v1 windowsets, foreign-toplevel toplevels);
-// the residue they cannot answer (focused output, per-window workspace, focus
-// order, geometry, output geometry, caps, workspace model) rides the daemon `wm`
-// topic. Consumers ask caps.*, never which compositor is running.
+// Capability-shaped view of the window manager. The daemon provider owns the
+// workspace and window state; Wayland protocols enrich it with handles and
+// protocol-only flags. Consumers ask caps.*, never which compositor is running.
 Singleton {
     id: root
 
     readonly property string sockPath: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/ryoku-shell.sock"
 
-    // The daemon publishes a full snapshot on every provider frame, tagged with
-    // a per-section version. Each section is copied into a backing property only
-    // when its own version moves, so a window drag rebinds the window-derived
-    // lists and leaves the workspace join, the keyboard feed, and the outputs
-    // list untouched. Derived read-only properties below depend on the backing
-    // property, which is exactly what makes Qt skip their re-evaluation.
+    // Provider state is versioned by section. The ordinary topic carries
+    // coalesced snapshots; focused-output changes use a compact topic because
+    // cursor crossings are frequent. Each section is copied into a backing
+    // property only when its own version moves, so a window drag leaves the
+    // workspace join, keyboard feed and output list untouched.
     property var _v: null
 
     property bool _ready: false
     property var _caps: ({})
     property string _workspaceModel: "fixed"
+    property string _provider: ""
     property var _configFiles: []
     property string _focusedOutput: ""
     property var _outputs: []
@@ -42,6 +40,9 @@ Singleton {
     // directly with no undefined guard.
     readonly property var caps: root._caps
     readonly property string workspaceModel: root._workspaceModel
+    // The running window manager as the provider names itself, for display
+    // only: behaviour asks caps, never this.
+    readonly property string provider: root._provider
 
     readonly property string focusedOutput: root._focusedOutput
     readonly property var outputs: root._outputs
@@ -69,33 +70,71 @@ Singleton {
         return null;
     }
 
-    // ext-workspace-v1 windowsets joined with the daemon's occupancy residue by
-    // name (windowset.id is empty on Hyprland; name is the stable key).
+    // The compositor's scale factor for an output, so a surface can convert
+    // its logical rectangle back to physical pixels. 1 until the daemon has
+    // reported that output.
+    function outputScale(name) {
+        const o = root.outputByName(name);
+        return o && typeof o.scale === "number" && o.scale > 0 ? o.scale : 1;
+    }
+
+    // The provider owns workspace identity and state. ext-workspace-v1 enriches
+    // matching names with protocol-only flags; it is a fallback only while the
+    // provider list is empty.
     readonly property var workspaces: {
-        const res = {};
-        for (let i = 0; i < root._wsResidue.length; i++) {
-            const w = root._wsResidue[i];
-            res[w.name] = w;
-        }
         const sets = root._windowsets || [];
+        const byName = {};
+        for (let i = 0; i < sets.length; i++)
+            byName[sets[i].name] = sets[i];
+
+        const residue = root._wsResidue || [];
         const out = [];
+        if (residue.length > 0) {
+            for (let i = 0; i < residue.length; i++) {
+                const r = residue[i];
+                const s = byName[r.name] || null;
+                out.push({
+                    id: r.id !== undefined && r.id !== "" ? String(r.id) : r.name,
+                    name: r.name,
+                    active: r.active === true,
+                    urgent: s ? s.urgent === true : false,
+                    canActivate: s ? s.canActivate === true : root.caps.workspaces === true,
+                    windows: r.windows || 0,
+                    occupied: (r.windows || 0) > 0,
+                    fullscreen: r.fullscreen === true,
+                    special: r.special === true,
+                    output: r.output || "",
+                    layout: r.layout || ""
+                });
+            }
+            return out;
+        }
+
         for (let i = 0; i < sets.length; i++) {
             const s = sets[i];
-            const r = res[s.name] || ({});
             out.push({
+                id: s.name,
                 name: s.name,
                 active: s.active === true,
                 urgent: s.urgent === true,
                 canActivate: s.canActivate === true,
-                windows: r.windows || 0,
-                occupied: (r.windows || 0) > 0,
-                fullscreen: r.fullscreen === true,
-                special: r.special === true,
-                output: r.output || "",
-                layout: r.layout || ""
+                windows: 0,
+                occupied: false,
+                fullscreen: false,
+                special: false,
+                output: "",
+                layout: ""
             });
         }
         return out;
+    }
+
+    function workspaceById(id) {
+        const list = root.workspaces;
+        for (let i = 0; i < list.length; i++)
+            if (list[i].id === id)
+                return list[i];
+        return null;
     }
 
     function workspaceByName(name) {
@@ -123,8 +162,20 @@ Singleton {
         const o = root.outputByName(name);
         if (!o || !o.activeWorkspace)
             return false;
-        const ws = root.workspaceByName(o.activeWorkspace);
-        return !!ws && ws.fullscreen === true;
+        const key = String(o.activeWorkspace);
+        const ws = root.workspaceById(key) || root.workspaceByName(key);
+        const providerFullscreen = !!ws && ws.fullscreen === true;
+        if (providerFullscreen || root.caps.workspaceFullscreenState === true)
+            return providerFullscreen;
+        const wins = root.windows;
+        for (let i = 0; i < wins.length; i++) {
+            const w = wins[i];
+            if (String(w.workspace || "") === key
+                    && String(w.output || "") === String(name)
+                    && w.toplevel?.fullscreen === true)
+                return true;
+        }
+        return false;
     }
 
     // Daemon window residue (identity, workspace, focus order, geometry) joined to
@@ -181,11 +232,12 @@ Singleton {
         return null;
     }
 
-    function windowsOnWorkspace(name) {
+    function windowsOnWorkspace(key) {
+        const workspace = root._wsId(key);
         const list = root.windows;
         const out = [];
         for (let i = 0; i < list.length; i++)
-            if (list[i].workspace === name)
+            if (String(list[i].workspace) === workspace)
                 out.push(list[i]);
         return out;
     }
@@ -213,21 +265,59 @@ Singleton {
         root._call("wm.act", { action: action, args: args, id: id });
     }
 
+    // Acknowledged action variant for mutations that must not be persisted
+    // until the compositor confirms them. cb(success, error) runs exactly once
+    // for a reply; capability rejection is an immediate failure.
+    function _actStatus(action, cap, args, cb) {
+        if (cap !== "" && root.caps[cap] !== true) {
+            if (cb) cb(false, "unsupported capability: " + cap);
+            return;
+        }
+        const id = ++root._nextId;
+        root._pending[id] = { status: true, callback: cb, deadline: Date.now() + 8000 };
+        statusExpiry.running = true;
+        root._call("wm.act", { action: action, args: args, id: id });
+    }
+
     function focusWindow(id) { root._act("window.focus", "", [String(id)]); }
     function closeWindow(id) { root._act("window.close", "", [String(id)]); }
     function focusApp(appId) { root._act("app.focus", "", [String(appId)]); }
     function floatWindow(id) { root._act("window.float", "windowFloat", [String(id)]); }
-    function moveWindowToWorkspace(id, ws) { root._act("window.moveToWorkspace", "workspaces", [String(id), String(ws)]); }
+    // Position is output-relative and all dimensions are logical pixels. The
+    // provider validates the opaque id and output rather than silently falling
+    // back to the focused window or output. cb(success, error) is optional.
+    function placeWindow(id, x, y, width, height, output, cb) {
+        root._actStatus("window.place", "windowFloat", [
+            String(id), String(Math.round(x)), String(Math.round(y)),
+            String(Math.round(width)), String(Math.round(height)), String(output)
+        ], cb);
+    }
+    // Actions take Workspace.ID. Most callers already pass that opaque key;
+    // display names remain accepted for older widgets that address a workspace
+    // by its label.
+    function _wsId(key) {
+        const k = String(key);
+        const list = root.workspaces;
+        for (let i = 0; i < list.length; i++)
+            if (String(list[i].id) === k)
+                return k;
+        for (let i = 0; i < list.length; i++)
+            if (String(list[i].name) === k)
+                return String(list[i].id);
+        return k;
+    }
 
-    function focusWorkspace(ws) { root._act("workspace.focus", "workspaces", [String(ws)]); }
+    function moveWindowToWorkspace(id, ws) { root._act("window.moveToWorkspace", "workspaces", [String(id), root._wsId(ws)]); }
+
+    function focusWorkspace(ws) { root._act("workspace.focus", "workspaces", [root._wsId(ws)]); }
     function cycleWorkspace(delta) { root._act("workspace.cycle", "workspaces", [String(delta)]); }
-    function moveWorkspaceToOutput(ws, output) { root._act("workspace.moveToOutput", "workspaceMoveToOutput", [String(ws), String(output)]); }
+    function moveWorkspaceToOutput(ws, output) { root._act("workspace.moveToOutput", "workspaceMoveToOutput", [root._wsId(ws), String(output)]); }
     function toggleSpecialWorkspace(name) { root._act("workspace.toggleSpecial", "specialWorkspace", [String(name || "")]); }
 
     function cycleKeyboardLayout() { root._act("keyboard.cycleLayout", "keyboardLayoutSwitch", []); }
     function setCursor(theme, size) { root._act("cursor.set", "cursorSet", [String(theme), String(size)]); }
     function reloadConfig(scope) { root._act("config.reload", "configReload", [String(scope || "")]); }
-    function setOutputPower(output, on) { root._act("output.power", "outputPower", [String(output), on ? "on" : "off"]); }
+    function setOutputPower(output, on) { root._act("output.power", "outputPower", [on ? "on" : "off", String(output)]); }
     function toggleOverview() { root._act("overview.toggle", "nativeOverview", []); }
     function enterSubmap(name) { root._act("submap.enter", "submap", [String(name)]); }
     function resetSubmap() { root._act("submap.reset", "submap", []); }
@@ -240,22 +330,38 @@ Singleton {
     function setWorkspaceLayout(ws, layout) { root._act("workspace.layout", "tiledLayout", [String(ws), String(layout)]); }
 
     // ---- transport ----
-    // Copy a section into its backing property only when its version moved, so
-    // the derived lists that depend on it rebind only when that section really
-    // changed. The first frame ever (and any frame from a pre-version daemon,
-    // which sends no versions map) copies everything, so caps and the model are
-    // live before the ready frame lands, exactly as the whole-frame swap did.
+    // The full topic moves only the sections that changed. Focus arrives on a
+    // compact topic so crossing an output never makes the GUI thread parse the
+    // output, workspace and window lists again. Versions make the two sockets
+    // safe to apply in either order during reconnect.
+    function _version(frameVersions, key) {
+        const n = frameVersions ? frameVersions[key] : undefined;
+        return typeof n === "number" ? n : 0;
+    }
+
+    function _newer(frameVersions, key) {
+        const previous = root._v && typeof root._v[key] === "number" ? root._v[key] : -1;
+        return root._version(frameVersions, key) > previous;
+    }
+
+    function _mark(frameVersions, key) {
+        if (root._v === null)
+            root._v = ({});
+        root._v[key] = root._version(frameVersions, key);
+    }
+
     function _apply(line) {
         try {
             const frame = JSON.parse(line);
             if (!frame || typeof frame !== "object" || Array.isArray(frame))
                 return;
             const v = frame.versions;
-            if (!v || root._v === null) {
-                root._v = {};
+            if (!v) {
+                root._v = null;
                 root._ready = frame.ready === true;
                 root._caps = frame.caps || ({});
                 root._workspaceModel = frame.workspaceModel || "fixed";
+                root._provider = frame.provider || "";
                 root._configFiles = frame.configFiles || [];
                 root._focusedOutput = frame.focusedOutput || "";
                 root._outputs = frame.outputs || [];
@@ -266,23 +372,56 @@ Singleton {
                 root._wsResidue = frame.workspaces || [];
                 return;
             }
-            const old = root._v;
-            if (v.ready !== old.ready) {
+            if (root._newer(v, "ready")) {
                 root._ready = frame.ready === true;
                 root._caps = frame.caps || ({});
                 root._workspaceModel = frame.workspaceModel || "fixed";
+                root._provider = frame.provider || "";
                 root._configFiles = frame.configFiles || [];
+                root._mark(v, "ready");
             }
-            if (v.windows !== old.windows) root._winResidue = frame.windows || [];
-            if (v.workspaces !== old.workspaces) root._wsResidue = frame.workspaces || [];
-            if (v.focus !== old.focus) root._focusedOutput = frame.focusedOutput || "";
-            if (v.outputs !== old.outputs) root._outputs = frame.outputs || [];
-            if (v.keyboard !== old.keyboard) {
+            if (root._newer(v, "windows")) {
+                root._winResidue = frame.windows || [];
+                root._mark(v, "windows");
+            }
+            if (root._newer(v, "workspaces")) {
+                root._wsResidue = frame.workspaces || [];
+                root._mark(v, "workspaces");
+            }
+            if (root._newer(v, "focus")) {
+                root._focusedOutput = frame.focusedOutput || "";
+                root._mark(v, "focus");
+            }
+            if (root._newer(v, "outputs")) {
+                root._outputs = frame.outputs || [];
+                root._mark(v, "outputs");
+            }
+            if (root._newer(v, "keyboard")) {
                 root._keyboardLayout = frame.keyboardLayout || "";
                 root._keyboardLayouts = frame.keyboardLayouts || [];
+                root._mark(v, "keyboard");
             }
-            if (v.overview !== old.overview) root._overviewOpen = frame.overviewOpen === true;
-            root._v = v;
+            if (root._newer(v, "overview")) {
+                root._overviewOpen = frame.overviewOpen === true;
+                root._mark(v, "overview");
+            }
+        } catch (e) {
+        }
+    }
+
+    function _applyFocus(line) {
+        try {
+            const frame = JSON.parse(line);
+            if (!frame || typeof frame !== "object" || Array.isArray(frame))
+                return;
+            const v = typeof frame.version === "number" ? frame.version : 0;
+            const previous = root._v && typeof root._v.focus === "number" ? root._v.focus : -1;
+            if (v <= previous)
+                return;
+            root._focusedOutput = frame.focusedOutput || "";
+            if (root._v === null)
+                root._v = ({});
+            root._v.focus = v;
         } catch (e) {
         }
     }
@@ -299,12 +438,79 @@ Singleton {
         try {
             const r = JSON.parse(line);
             if (r && r.id !== undefined && root._pending[r.id] !== undefined) {
-                const cb = root._pending[r.id];
+                const pending = root._pending[r.id];
                 delete root._pending[r.id];
-                if (cb) cb((r.ok && typeof r.result === "string") ? r.result : "");
+                if (typeof pending === "function") {
+                    pending((r.ok && typeof r.result === "string") ? r.result : "");
+                } else if (pending && pending.status === true && pending.callback) {
+                    pending.callback(r.ok === true, r.ok === true ? "" : String(r.error || "window-manager action failed"));
+                }
             }
+            if (!root._hasStatusPending())
+                statusExpiry.running = false;
         } catch (e) {
         }
+    }
+
+    function _hasStatusPending() {
+        const ids = Object.keys(root._pending);
+        for (let i = 0; i < ids.length; i++) {
+            const pending = root._pending[ids[i]];
+            if (pending && pending.status === true)
+                return true;
+        }
+        return false;
+    }
+
+    function _dropQueuedStatusCalls(failed) {
+        if (!ctl.queued.length)
+            return;
+        const kept = [];
+        const lines = ctl.queued.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (!line.length)
+                continue;
+            const jsonAt = line.indexOf(" ", 5);
+            if (jsonAt < 0) {
+                kept.push(line);
+                continue;
+            }
+            try {
+                const args = JSON.parse(line.slice(jsonAt + 1));
+                if (args && failed[String(args.id)] === true)
+                    continue;
+            } catch (e) {
+            }
+            kept.push(line);
+        }
+        ctl.queued = kept.length ? kept.join("\n") + "\n" : "";
+    }
+
+    function _failStatusPending(error, expiredOnly) {
+        const now = Date.now();
+        const failed = ({});
+        const ids = Object.keys(root._pending);
+        for (let i = 0; i < ids.length; i++) {
+            const id = ids[i];
+            const pending = root._pending[id];
+            if (!pending || pending.status !== true
+                    || (expiredOnly === true && pending.deadline > now))
+                continue;
+            failed[String(id)] = true;
+            delete root._pending[id];
+            if (pending.callback)
+                pending.callback(false, error);
+        }
+        root._dropQueuedStatusCalls(failed);
+        statusExpiry.running = root._hasStatusPending();
+    }
+
+    Timer {
+        id: statusExpiry
+        interval: 500
+        repeat: true
+        onTriggered: root._failStatusPending("window-manager action timed out", true)
     }
 
     Socket {
@@ -322,10 +528,30 @@ Singleton {
         }
     }
 
+    Socket {
+        id: focusSub
+        path: root.sockPath
+        parser: SplitParser { onRead: line => root._applyFocus(line) }
+        Component.onCompleted: connected = true
+        onConnectionStateChanged: {
+            if (connected) {
+                write("subscribe wm.focus\n");
+                flush();
+            } else {
+                retry.restart();
+            }
+        }
+    }
+
     Timer {
         id: retry
         interval: 2000
-        onTriggered: if (!sub.connected) sub.connected = true
+        onTriggered: {
+            if (!sub.connected)
+                sub.connected = true;
+            if (!focusSub.connected)
+                focusSub.connected = true;
+        }
     }
 
     Socket {
@@ -340,6 +566,12 @@ Singleton {
             flush();
             queued = "";
         }
-        onConnectionStateChanged: if (connected) flushQueued()
+        onConnectionStateChanged: {
+            if (connected) {
+                flushQueued();
+            } else {
+                root._failStatusPending("window-manager control connection closed");
+            }
+        }
     }
 }

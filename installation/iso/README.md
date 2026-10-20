@@ -40,12 +40,20 @@ path; the switch only decides what the closure carries and what the installer
 does with it:
 
 - **plain** stock Arch: the `linux` kernel, base + drivers + the Ryoku desktop.
-- **cachyos** everything in plain, plus the CachyOS layer baked in
-  (`system/packages/cachyos.packages`: `linux-cachyos` + headers,
-  `cachyos-settings`, `ananicy-cpp` + rules, `scx-scheds`, `proton-cachyos`). The
-  installer boots `linux-cachyos` (stock `linux` stays as the fallback the Limine
-  hook lists) and wires the CachyOS repositories into the target
-  (`lib/cachyos.sh`), so the box tracks CachyOS on future updates.
+- **cachyos** a CachyOS install with the Ryoku desktop on top. The closure
+  resolves against the generic `[cachyos]` repo above Arch's, where a CachyOS
+  install lists it, so the target starts on CachyOS's builds of what it forks
+  (pacman, mesa, the firmware, the kernel layer) and installs on any x86-64
+  CPU. It adds the CachyOS
+  layer (`system/packages/cachyos.packages`: `linux-cachyos` with
+  `linux-cachyos-lts` as the fallback the Limine hook lists, `cachyos-settings`,
+  `ananicy-cpp` + rules, `scx-scheds`, `proton-cachyos`, CachyOS's own tools)
+  and leaves out what that layer replaces (`cachyos.replaces`: the stock kernel,
+  the AUR's `yay-bin`). An `aur.packages` name a CachyOS repo serves is fetched
+  from it rather than built. The installer boots `linux-cachyos`, writes
+  CachyOS's own `pacman.conf` with the repos for the CPU's tier
+  (`lib/cachyos.sh`). As with CachyOS's own offline install, the first
+  `pacman -Syu` then moves a v3, v4 or Zen 4 CPU onto that tier's builds.
 
 CI builds both from the same tree: `build-iso.yml` (plain) and
 `build-iso-cachyos.yml` (cachyos) each call the reusable `build-iso-reusable.yml`.
@@ -111,6 +119,13 @@ The ISO lands in `installation/iso/out/`. To stage everything but stop before
 ./build.sh --stage-only
 ```
 
+The payload under `/usr/share/ryoku` is baked from `HEAD`. To test uncommitted
+work, bake the working tree instead (no commit is made):
+
+```
+RYOKU_ISO_WORKTREE=1 ./build.sh
+```
+
 If `mkarchiso` is missing, `build.sh` stages the profile and prints the exact
 command to finish by hand:
 
@@ -119,7 +134,9 @@ sudo --preserve-env=SOURCE_DATE_EPOCH mkarchiso -v -w work -o out ./staging/prof
 ```
 
 Output, work, and staging directories live under `installation/iso/` and are
-git-ignored.
+git-ignored, as is the package cache the offline bake keeps per variant
+(`offline-cache-plain`, `offline-cache-cachyos`) so a rebuild downloads only
+what changed.
 
 ## Booting it
 

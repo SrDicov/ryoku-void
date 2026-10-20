@@ -176,6 +176,7 @@ func TestActCyclesOneStepPerUnit(t *testing.T) {
 func TestActRejectsMissingArgs(t *testing.T) {
 	for _, args := range [][]string{
 		{"window.focus"},
+		{"window.place", "7", "0", "0", "700"},
 		{"window.moveToWorkspace", "7"},
 		{"workspace.focus"},
 		{"workspace.moveToOutput", "3"},
@@ -310,6 +311,7 @@ func TestActCyclesOutputsOverIPC(t *testing.T) {
 // status reads the file, never the compositor, and toggle flips it.
 func TestActTouchpadTracksStateFile(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	prevNotify := touchpadNotify
 	touchpadNotify = func(string, string) {}
@@ -376,7 +378,7 @@ func stubRequest(t *testing.T, fn func(any) (json.RawMessage, error)) func() {
 
 // The colour temperature is clamped to the range the gamma client accepts and a
 // missing or unparseable argument falls back to the default, so a stray keybind
-// argument can never ask gammastep for a value it would reject or for 0 K.
+// argument can never ask wlsunset for a value it would reject or for 0 K.
 func TestNightlightTempClamps(t *testing.T) {
 	for _, tc := range []struct {
 		args []string

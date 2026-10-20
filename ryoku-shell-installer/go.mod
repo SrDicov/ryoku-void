@@ -34,3 +34,7 @@ replace ryoku-i18n => ../ryoku/i18n
 require ryoku-wm v0.0.0
 
 replace ryoku-wm => ../ryoku/wm
+
+require ryoku-installerplan v0.0.0
+
+replace ryoku-installerplan => ../installation/installerplan

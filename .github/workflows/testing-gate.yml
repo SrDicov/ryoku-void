@@ -1,0 +1,70 @@
+name: Testing gate
+
+# Advances the testing source pointer only after every required check on an
+# unstable-dev push completes successfully.
+
+on:
+  push:
+    branches: [unstable-dev]
+
+concurrency:
+  group: testing-gate
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+  checks: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      GH_TOKEN: ${{ github.token }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install rclone and jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y rclone jq
+
+      - name: Configure the bucket
+        run: bin/ryoku-r2-config
+
+      - name: Mark checks in progress
+        run: bin/ryoku-checked-pointer "Ryoku:$R2_BUCKET" checking "$GITHUB_SHA" --run "$RUN_URL"
+
+      - name: Wait for required checks
+        run: |
+          set -euo pipefail
+          bin/ryoku-ci-gate "$GITHUB_SHA" --timeout-min 25 --json \
+            | tee "$RUNNER_TEMP/testing-gate.json"
+
+      - name: Advance the checked pointer
+        run: |
+          set -euo pipefail
+          checks=$(jq -r '.checks[].name' "$RUNNER_TEMP/testing-gate.json" | paste -sd,)
+          bin/ryoku-checked-pointer "Ryoku:$R2_BUCKET" passed "$GITHUB_SHA" \
+            --run "$RUN_URL" --checks "$checks"
+
+      - name: Mark checks failed
+        if: failure()
+        run: |
+          set -euo pipefail
+          checks=""
+          if [[ -s $RUNNER_TEMP/testing-gate.json ]]; then
+            checks=$(jq -r '.checks[].name' "$RUNNER_TEMP/testing-gate.json" | paste -sd,)
+          fi
+          bin/ryoku-checked-pointer "Ryoku:$R2_BUCKET" failed "$GITHUB_SHA" \
+            --run "$RUN_URL" --checks "$checks"

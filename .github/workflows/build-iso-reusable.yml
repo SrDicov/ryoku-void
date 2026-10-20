@@ -22,6 +22,10 @@ on:
         description: '[ryoku] repo the ISO bakes its offline closure from; empty = the stable pointer'
         type: string
         default: ''
+      publish:
+        description: 'Upload the ISO and move the latest pointer; false keeps it as a workflow artifact only'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -108,9 +112,7 @@ jobs:
             echo "RYOKU_ISO_RUN_NUMBER=$GITHUB_RUN_NUMBER"
             echo "RYOKU_ISO_RUN_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "RYOKU_ISO_CHANNEL=$RELEASE_STAGE"
-            ref=main
-            [[ $GITHUB_REF_NAME == v* ]] && ref=$GITHUB_REF_NAME
-            echo "RYOKU_ISO_INSTALLER_REF=$ref"
+            echo "RYOKU_ISO_INSTALLER_REF=$GITHUB_REF_NAME"
             echo "RYOKU_ISO_VARIANT=$RYOKU_VARIANT"
             # public base the manifest urls point at: where R2 actually serves
             # these files and where the site reads them (ryoku-site
@@ -184,6 +186,7 @@ jobs:
             -e HOST_UID="$(id -u)" \
             -e HOST_GID="$(id -g)" \
             -e RYOKU_VARIANT="$RYOKU_VARIANT" \
+            -e RYOKU_ISO_REPO_URL="$RYOKU_ISO_REPO_URL" \
             archlinux:latest \
             bash -euo pipefail -c '
               # refresh the keyring first: a stale base image cannot verify
@@ -415,6 +418,7 @@ jobs:
           curl -fsSL https://rclone.org/install.sh | sudo bash
 
       - name: Upload to Cloudflare R2
+        if: ${{ inputs.publish }}
         env:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -472,6 +476,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           BUILD_STATUS: ${{ job.status }}
           ISO_NAME: ${{ steps.iso.outputs.name }}
+          PUBLISH: ${{ inputs.publish }}
         run: |
           set -euo pipefail
 
@@ -488,6 +493,9 @@ jobs:
             failure) title="Ryoku ISO build failed";    color=15158332; image="(no image produced)" ;;
             *)       title="Ryoku ISO build ${BUILD_STATUS}"; color=10070709; image="${ISO_NAME:-n/a}" ;;
           esac
+          if [[ "$PUBLISH" != true ]]; then
+            title+=" (unpublished test build)"
+          fi
 
           jq -n \
             --arg title "$title" \

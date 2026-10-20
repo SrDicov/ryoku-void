@@ -14,8 +14,9 @@ instantly and toggles with `ryoku-shell launcher`.
 
 ## Launcher variants
 
-Hero is the default launcher. Ryoku Settings -> App Launcher offers three
-complete styles and saves the choice as `variant` in
+Hero is the default launcher. Ryoku Settings -> App Launcher offers six
+complete styles, plus any launcher installed from RyoStore (see
+[Store launchers](#store-launchers)), and saves the choice as `variant` in
 `~/.config/ryoku/launcher.json`:
 
 - **Main** is a compact command palette with the centered RestDashboard image
@@ -29,6 +30,16 @@ complete styles and saves the choice as `variant` in
   clock, the app search and the app list. It masks input to the pill rather than
   the window, so the desktop around it stays clickable; Escape (or Super+Space
   again) closes it.
+- **Spotlight** is the Shima launcher, the one the Shima bar style ships: it
+  drives the frame's morphing-glass search, so Super+Space opens the same
+  spotlight the island's search bubble does, with apps, actions, commands, math
+  and web in one row. When another bar style is active no frame hosts the
+  palette, so the variant mounts the frame's palette surface itself.
+- **Python** is the Python bar style's launcher, ported 1:1 from Serpantinum by
+  ilyamiro: the bar-attached search pill that docks under the bar edge, ranks
+  apps by launch usage, and carries a Files tab beside the app list. It reads
+  the style's own settings namespace, so pick it with the Python bar for the
+  full look.
 
 The resident `shell.qml` selector loads the saved catalog entry without changing
 the stable `ryoku-shell launcher` command or socket. An unknown saved ID resolves
@@ -63,6 +74,35 @@ not add irrelevant settings to other designs.
    switching from an already-open launcher.
 6. Add focused unit and live scenarios under `launcher/shared/lib/` and
    `launcher/qa/`; run the launcher QA suite and review its screenshot.
+
+## Store launchers
+
+Community launchers come from **RyoStore -> App launchers**, the `launchers/`
+catalogue of the ryostore repository (its `launchers/AUTHORING.md` is the
+author's guide). A store launcher keeps the variant contract above: a folder
+with a `Main.qml` runtime root and, optionally, a `Preview.qml`.
+
+- Installing writes the receipt-owned folder, publishes
+  `~/.local/state/ryoku/store/launchers.json` (rows of `id`, `version`,
+  `preview`, `view`) with a content-addressed copy under
+  `launcher-views/<id>/<digest>/`, and bumps the Store `revision.json`. It never
+  changes `variant`.
+- `shared/Singletons/LauncherProducts.qml` reads that index and follows the
+  revision. `shared/lib/catalog.js` `withStore()` appends its rows to the shipped
+  catalog as entries whose `url` is the view's file URL. A shipped id always wins,
+  and a row whose view is not `launcher-views/<its id>/<digest>` is dropped.
+- The per-screen host (`modules/launcher/Launcher.qml`) waits for the index
+  before resolving the saved id, so a saved store launcher opens on the first
+  Super+Space after login. An update moves the view, so the host swaps the new
+  copy in the way it switches variants.
+- Ryoku Settings -> App Launcher lists installed store launchers beside the
+  shipped six with a STORE tag, previews each with its own `Preview.qml` (or the
+  store art when it has none), and offers UPDATE and BROWSE RYOSTORE. Picking and
+  saving one is the same as picking a shipped variant.
+- Removing the launcher in use resets `variant` to `""`, the default, inside the
+  same journaled Store transaction. The shipped ids (`main`, `hero`, `okshell`,
+  `kairos`, `spotlight`, `python`) are reserved: the Store refuses to install,
+  list, or remove them, and the catalogue validator rejects them.
 
 ## Hero anatomy
 

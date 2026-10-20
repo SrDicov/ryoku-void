@@ -179,34 +179,63 @@ while IFS=: read -r file lineno _; do
   fail "unguarded in-chroot call to $helper (a target whose baked desktop set predates it dies here): $file:$lineno"
 done < <(grep -rnE '^[^#]*run arch-chroot /mnt ryoku-[a-z-]+' "$root/installation/backend/lib/" || true)
 
-# ---- 7. CachyOS update repositories match the CPU ISA ------------------------
+# ---- 7. CachyOS pacman.conf and update repositories match the CPU ------------
+# The target gets CachyOS's own pacman.conf (CachyOS-Live-ISO pacman-more.conf)
+# with the CPU tier's repositories above [cachyos], in the order
+# cachyos-calamares' detect-architecture writes them.
 # the sourced cachyos.sh calls these stubs; shellcheck can't see across source
 # shellcheck disable=SC2329
 (
-  run() { "$@"; }
-  append_file() { cat >>"$1"; }
+  write_file() { cat >"$1"; }
   log() { :; }
   # shellcheck source=/dev/null
   source "$root/installation/backend/lib/cachyos.sh"
 
-  baseline="$tmp/cachyos-baseline.conf"
-  printf '[options]\nArchitecture = auto\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n' >"$baseline"
-  ryoku_cachyos_repos "$baseline" 0
-  headers=$(grep -oE '^\[[a-z0-9_-]+\]' "$baseline" | grep -v '^\[options\]$')
-  [[ $headers == $'[cachyos]\n[core]' ]] \
-    || fail "baseline CachyOS repo order is '$headers'"
-  ! grep -qF 'x86_64_v3' "$baseline" \
-    || fail "baseline CachyOS config enabled x86_64_v3 packages"
+  tail=$'[cachyos]\n[core]\n[extra]\n[multilib]'
+  declare -A want=(
+    [v3]=$'[cachyos-v3]\n[cachyos-extra-v3]\n[cachyos-core-v3]\n'"$tail"
+    [v4]=$'[cachyos-v4]\n[cachyos-extra-v4]\n[cachyos-core-v4]\n'"$tail"
+    [znver4]=$'[cachyos-znver4]\n[cachyos-core-znver4]\n[cachyos-extra-znver4]\n'"$tail"
+    [none]=$tail
+  )
+  for level in v3 v4 znver4 none; do
+    conf="$tmp/cachyos-$level.conf"
+    ryoku_cachyos_pacman_conf "$conf" "${level#none}"
+    headers=$(grep -oE '^\[[a-z0-9_-]+\]' "$conf" | grep -v '^\[options\]$')
+    [[ $headers == "${want[$level]}" ]] || fail "$level CachyOS repo order is '$headers'"
+    for opt in 'Architecture = auto' Color VerbosePkgLists 'ParallelDownloads = 10' 'DownloadUser = alpm' \
+               'SigLevel    = Required DatabaseOptional'; do
+      grep -qxF "$opt" "$conf" || fail "$level CachyOS pacman.conf lacks '$opt'"
+    done
+  done
+  grep -qxF 'Include = /etc/pacman.d/cachyos-v4-mirrorlist' "$tmp/cachyos-znver4.conf" \
+    || fail "znver4 repositories do not use the v4 mirrorlist"
 
-  v3="$tmp/cachyos-v3.conf"
-  printf '[options]\nArchitecture = auto\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n' >"$v3"
-  ryoku_cachyos_arch "$v3"
-  ryoku_cachyos_repos "$v3" 1
-  headers=$(grep -oE '^\[[a-z0-9_-]+\]' "$v3" | grep -v '^\[options\]$')
-  [[ $headers == $'[cachyos-v3]\n[cachyos-core-v3]\n[cachyos-extra-v3]\n[cachyos]\n[core]' ]] \
-    || fail "v3 CachyOS repo order is '$headers'"
-  grep -qE '^Architecture[[:space:]]*=.*x86_64_v3' "$v3" \
-    || fail "v3 CachyOS config did not enable x86_64_v3 packages"
+  # znver4 goes to Zen 4/5 with AVX-512 only (detect-architecture's table).
+  cpu() { printf 'cpu family\t: %s\nmodel\t\t: %s\nmodel name\t: x\nflags\t\t: fpu %s\n' "$1" "$2" "$3" >"$tmp/cpuinfo"; }
+  cpu 25 97 'avx2 avx512f'; ryoku_cachyos_is_zen45 "$tmp/cpuinfo" || fail "Zen 4 (25/97) with AVX-512 not read as znver4"
+  cpu 26 68 'avx2 avx512f'; ryoku_cachyos_is_zen45 "$tmp/cpuinfo" || fail "Zen 5 (26/68) with AVX-512 not read as znver4"
+  cpu 25 33 'avx2 avx512f'; ! ryoku_cachyos_is_zen45 "$tmp/cpuinfo" || fail "Zen 3 (25/33) read as znver4"
+  cpu 25 97 'avx2'; ! ryoku_cachyos_is_zen45 "$tmp/cpuinfo" || fail "a CPU without AVX-512 read as znver4"
+  cpu 6 143 'avx2 avx512f'; ! ryoku_cachyos_is_zen45 "$tmp/cpuinfo" || fail "an Intel CPU read as znver4"
+)
+
+# ---- 8. a CachyOS install drops the names CachyOS replaces --------------------
+# the stock kernel joins the drop list, which keeps it out of pacstrap and puts it
+# in the provisioning ledger, so `ryoku update` never delivers it afterwards.
+# shellcheck disable=SC2329
+(
+  log() { :; }
+  # shellcheck source=/dev/null
+  source "$root/installation/backend/lib/choices.sh"
+  # shellcheck source=/dev/null
+  source "$root/installation/backend/lib/cachyos.sh"
+  export RYOKU_REPO=$root
+  RYOKU_DROP_PACKAGES=chromium
+  ryoku_cachyos_drops
+  [[ $RYOKU_DROP_PACKAGES == chromium,linux,yay-bin ]] || fail "CachyOS drop list is '$RYOKU_DROP_PACKAGES'"
+  ryoku_cachyos_drops
+  [[ $RYOKU_DROP_PACKAGES == chromium,linux,yay-bin ]] || fail "CachyOS drops are not idempotent: '$RYOKU_DROP_PACKAGES'"
 )
 
 echo "install-offline: OK"

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,6 +64,16 @@ func runInteractive(name string, args ...string) error {
 	return cmd.Run()
 }
 
+func setupInstallAdvice(pkg string) string {
+	out, err := exec.Command("ryoku-host", "pkg", "advice", pkg).Output()
+	if err == nil {
+		if advice := strings.TrimSpace(string(out)); advice != "" {
+			return advice
+		}
+	}
+	return "install " + pkg
+}
+
 func cmdSetup() error {
 	if err := RunSetup(); err != nil {
 		reportPhase("error", err.Error(), false)
@@ -80,10 +91,10 @@ func RunSetup() error {
 	// "uv lock missing" a broken or offline install throws) into one clear line.
 	reportPhase("preflight", "checking tools, connectivity, and disk space", true)
 	if !haveCmd("curl") {
-		return errors.New("curl is required for the Hermes installer (sudo pacman -S curl)")
+		return fmt.Errorf("curl is required for the Hermes installer (%s)", setupInstallAdvice("curl"))
 	}
 	if !haveCmd("uv") && !haveCmd("python3") {
-		return errors.New("Hermes needs uv or python3 to install (sudo pacman -S uv), then re-run setup")
+		return fmt.Errorf("Hermes needs uv or python3 to install (%s), then re-run setup", setupInstallAdvice("uv"))
 	}
 	if !setupOnline() {
 		return errors.New("Hermes setup needs an internet connection: it downloads the agent and its Python dependencies from GitHub and PyPI")
@@ -110,14 +121,46 @@ func RunSetup() error {
 		return errors.New("hermes not found after install; open a new terminal and re-run setup")
 	}
 
-	// Onboard: only when hermes has no config yet, and through hermes itself.
-	if HermesStatus().Configured {
-		reportPhase("onboard", "Hermes already configured, keeping your provider and model", true)
+	// A configured Hermes keeps its own default; a fresh install can use Prowl
+	// to become ACP-ready before interactive onboarding.
+	hermesDefault := hermesProwlDefault()
+	acpReady := false
+	if setupDryRun() {
+		reportPhase("route", "would connect Hermes to Prowl", true)
 	} else {
-		reportPhase("onboard", "running hermes setup (pick your provider and model)", true)
+		if err := startGateway(); err != nil {
+			return fmt.Errorf("start Prowl gateway: %w", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		pending, reason, err := connectHarness(ctx, "hermes", hermesDefault)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("connect hermes to Prowl: %w", err)
+		}
+		if pending {
+			reportPhase("route", "Hermes connected; "+reason, true)
+		} else {
+			reportPhase("route", "Hermes connected to Prowl", true)
+		}
+		if hermesBin != "" {
+			acpReady = exec.Command(hermesBin, "acp", "--check").Run() == nil
+		}
+	}
+	if acpReady {
+		reportPhase("onboard", "Hermes is ready through Prowl", true)
+	} else {
+		reportPhase("onboard", "running hermes setup", true)
 		if hermesBin != "" {
 			if err := runInteractive(hermesBin, "setup"); err != nil {
 				return fmt.Errorf("hermes setup: %w", err)
+			}
+		}
+		if !setupDryRun() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_, _, err := connectHarness(ctx, "hermes", false)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("restore Prowl injection after hermes setup: %w", err)
 			}
 		}
 	}
@@ -168,6 +211,11 @@ func RunSetup() error {
 	fmt.Printf("\nRashin is ready: %s\npress enter to close\n", url)
 	fmt.Scanln()
 	return nil
+}
+
+func hermesProwlDefault() bool {
+	_, _, configured := hermesModel()
+	return !configured
 }
 
 // installHermes downloads the official installer to a temp file and runs it

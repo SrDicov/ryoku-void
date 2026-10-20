@@ -9,6 +9,12 @@
   comma-separated allowlist.
 
 ### Fixed
+- **Bundles install on Fedora and Void.** `ryostore-install` routes package
+  items through `ryoku-host` with the catalogue's edition table laid under
+  Ryoku's, asks `ryoku-host pkg status` once per bundle, marks a package the
+  edition does not ship unavailable with the table's reason, and honours a
+  `packageManagers` gate on a bundle or an item. `ryoku-pkg-add` and
+  `ryoku-pkg-remove` carry the table across `sudo` as `--overlay`.
 - **The CachyOS kernel toggle adds only `[cachyos-v3]` again, not the whole
   CachyOS stack.** `ryoku-pkg-cachyos` had drifted to also add
   `[cachyos-core-v3]`, `[cachyos-extra-v3]`, and the baseline `[cachyos]` --

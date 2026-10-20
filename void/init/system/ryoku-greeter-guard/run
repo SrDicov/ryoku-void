@@ -1,0 +1,9 @@
+#!/bin/sh
+exec 2>&1
+
+. "${RYOKU_INIT_LIB:-/usr/lib/ryoku/runit}/wait-for"
+load_session_env
+
+# runit has no ordering: the guard only ever acts once the sddm daemon is
+# running, so starting beside it is safe.
+exec /usr/share/ryoku/lockscreen/ryoku-greeter-guard

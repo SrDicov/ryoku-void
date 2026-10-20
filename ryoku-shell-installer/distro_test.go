@@ -17,8 +17,9 @@ func TestDetectDistro(t *testing.T) {
 		{"debian", "", "debian"},
 		{"ubuntu", "debian", "debian"},
 		{"linuxmint", "ubuntu debian", "debian"},
-		{"fedora", "", ""},
 		{"void", "", "void"},
+		{"fedora", "", "fedora"},
+		{"ultramarine", "fedora", "fedora"},
 	} {
 		d := detectDistro(c.id, c.like)
 		got := ""
@@ -41,33 +42,23 @@ func TestLocalAllRenamesAndDrops(t *testing.T) {
 	if archLinux.local("networkmanager") != "networkmanager" {
 		t.Error("arch must pass base.packages names through unchanged")
 	}
-	// Spot-checks against the Void repodata index; the full map is docs/void.md.
-	for _, c := range []struct{ arch, void string }{
-		{"networkmanager", "NetworkManager"},
-		{"fish", "fish-shell"},
-		{"bluez-utils", "bluez"},
-		{"vulkan-icd-loader", "vulkan-loader"},
-		{"xorg-xwayland", "xorg-server-xwayland"},
-		{"qt6-5compat", "qt6-qt5compat"},
-		{"qemu-desktop", "qemu"},
-		{"tesseract-data-eng", "tesseract-ocr-eng"},
-		{"xpadneo-dkms", "xpadneo"},
-		{"imagemagick", "ImageMagick"},
-		{"mangohud", "MangoHud"},
-		{"hypridle", ""},
-		{"blesh", ""},
-		{"vimix-cursors", "bibata-cursor-theme"},
-		{"ttf-material-symbols-variable", "not-st"},
-		{"npm", ""},
-	} {
-		if got := voidLinux.local(c.arch); got != c.void {
-			t.Errorf("void local(%q) = %q, want %q", c.arch, got, c.void)
-		}
+}
+
+func TestSupportedInit(t *testing.T) {
+	if !supportsInit(archLinux, initSystemd) || supportsInit(archLinux, initRunit) {
+		t.Fatal("Arch must require systemd")
+	}
+	if !supportsInit(voidLinux, initSystemd) || !supportsInit(voidLinux, initRunit) {
+		t.Fatal("Void must accept the systemd predicate's runit alternative")
+	}
+	if !supportsInit(fedoraLinux, initSystemd) || supportsInit(fedoraLinux, initRunit) {
+		t.Fatal("Fedora must require systemd")
 	}
 }
 
-// The Arch step list is the contract that must not drift; the Debian one swaps
-// the pacman-only steps for the source build.
+// The Arch step list is the contract that must not drift. Debian retains its
+// source-only font and build steps; packaged Void follows the repository path
+// and configures drivers after its package transaction.
 func TestStepsPerDistro(t *testing.T) {
 	ids := func(f *facts) []string {
 		e := newEngine(f, &plan{}, true, "", "")
@@ -78,43 +69,31 @@ func TestStepsPerDistro(t *testing.T) {
 		return out
 	}
 
+	t.Setenv("RYOKU_HOST_INIT", "systemd")
 	arch := strings.Join(ids(&facts{distro: archLinux}), " ")
 	wantArch := "legacy sysupgrade tools payload backup repo conflicts packages drivers session configs aur shell doctor verify"
 	if arch != wantArch {
 		t.Errorf("arch steps = %q, want %q", arch, wantArch)
 	}
 
-	deb := strings.Join(ids(&facts{distro: debianLinux}), " ")
-	wantDeb := "sysupgrade tools payload backup conflicts packages build session configs shell doctor verify"
-	if deb != wantDeb {
-		t.Errorf("debian steps = %q, want %q", deb, wantDeb)
+	debian := strings.Join(ids(&facts{distro: debianLinux}), " ")
+	wantDebian := "sysupgrade tools payload backup conflicts packages fonts build session configs shell doctor verify"
+	if debian != wantDebian {
+		t.Errorf("debian steps = %q, want %q", debian, wantDebian)
 	}
 
-	// Void builds from source exactly like Debian: no [ryoku] repo, no AUR,
-	// no pacman-only driver step. It keeps the z-repo trust step, which Debian
-	// has no equivalent for.
-	voi := strings.Join(ids(&facts{distro: voidLinux}), " ")
-	wantVoid := "sysupgrade zrepo tools payload backup conflicts packages build session configs shell doctor verify"
-	if voi != wantVoid {
-		t.Errorf("void steps = %q, want %q", voi, wantVoid)
+	t.Setenv("RYOKU_HOST_INIT", "runit")
+	void := strings.Join(ids(&facts{distro: voidLinux}), " ")
+	wantVoid := "sysupgrade tools payload backup repo conflicts packages drivers session configs shell doctor verify"
+	if void != wantVoid {
+		t.Errorf("void steps = %q, want %q", void, wantVoid)
 	}
-}
 
-// A box can only run the window managers it has installed: Void packages niri
-// but not hyprland, so the default pick has to follow what is on PATH or the
-// install lands on a compositor with no binary.
-func TestAvailableCompositorsFollowsPATH(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("PATH", dir)
-	if got := availableCompositors(); len(got) != len(compositors()) {
-		t.Errorf("with no compositor installed, got %v, want all of %v", got, compositors())
-	}
-	if err := os.WriteFile(filepath.Join(dir, "niri"), []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	got := availableCompositors()
-	if len(got) != 1 || got[0] != "niri" {
-		t.Errorf("with only niri installed, got %v, want [niri]", got)
+	t.Setenv("RYOKU_HOST_INIT", "systemd")
+	fedora := strings.Join(ids(&facts{distro: fedoraLinux}), " ")
+	wantFedora := "sysupgrade tools payload backup repo conflicts packages drivers session configs shell doctor verify"
+	if fedora != wantFedora {
+		t.Errorf("fedora steps = %q, want %q", fedora, wantFedora)
 	}
 }
 
@@ -130,6 +109,87 @@ func TestInstallArgs(t *testing.T) {
 	got = strings.Join(debianLinux.removeArgs([]string{"dunst"}), " ")
 	if got != "apt-get -y remove dunst" {
 		t.Errorf("debian removeArgs = %q", got)
+	}
+}
+
+func TestVoidInstallArgs(t *testing.T) {
+	if got := strings.Join(voidLinux.installArgs([]string{"git"}), " "); got != "xbps-install -Sy git" {
+		t.Errorf("Void installArgs = %q", got)
+	}
+	if got := strings.Join(voidLinux.removeArgs([]string{"dunst"}), " "); got != "xbps-remove -y dunst" {
+		t.Errorf("Void removeArgs = %q", got)
+	}
+}
+
+func TestFedoraInstallArgs(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "dnf5"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	d := newFedoraLinux()
+	dnf := d.installCmd[0]
+	if dnf != "dnf5" {
+		t.Fatalf("Fedora command = %q, want dnf5 when it is available", dnf)
+	}
+	if got := strings.Join(d.installArgs([]string{"ryoku"}), " "); got != dnf+" install -y ryoku" {
+		t.Errorf("Fedora installArgs = %q", got)
+	}
+	if got := strings.Join(d.removeArgs([]string{"ryoku"}), " "); got != dnf+" remove -y ryoku" {
+		t.Errorf("Fedora removeArgs = %q", got)
+	}
+	if got := strings.Join(d.refreshCmd, " "); got != dnf+" makecache --refresh -y" {
+		t.Errorf("Fedora refresh argv = %q", got)
+	}
+}
+
+func TestVoidRepositoryPackagesInstallFirst(t *testing.T) {
+	pkgs := []string{
+		"mesa", "void-repo-multilib", "libdrm-32bit",
+		"void-repo-nonfree", "nvidia-utils",
+	}
+	phases := voidLinux.installPhases(pkgs)
+	if len(phases) != 2 {
+		t.Fatalf("install phases = %v, want repository and package transactions", phases)
+	}
+	if got, want := strings.Join(phases[0], " "), "void-repo-multilib void-repo-nonfree"; got != want {
+		t.Fatalf("repository phase = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(phases[1], " "), "mesa libdrm-32bit nvidia-utils"; got != want {
+		t.Fatalf("package phase = %q, want %q", got, want)
+	}
+
+	e := &engine{f: &facts{distro: voidLinux}, dry: true, events: make(chan any, 4)}
+	if err := installPackagePlan(e, voidLinux, pkgs); err != nil {
+		t.Fatal(err)
+	}
+	close(e.events)
+	var commands []string
+	for event := range e.events {
+		if line, ok := event.(evLine); ok {
+			commands = append(commands, line.line)
+		}
+	}
+	wantCommands := []string{
+		"DRYRUN: sudo -n xbps-install --repository " + voidStableRepo + " -Sy void-repo-multilib void-repo-nonfree",
+		"DRYRUN: sudo -n xbps-install --repository " + voidStableRepo + " -Sy mesa libdrm-32bit nvidia-utils",
+	}
+	if strings.Join(commands, "\n") != strings.Join(wantCommands, "\n") {
+		t.Fatalf("install commands = %v, want %v", commands, wantCommands)
+	}
+}
+
+func TestVoidInstalledPackageUsesExitStatus(t *testing.T) {
+	query := filepath.Join(t.TempDir(), "xbps-query")
+	if err := os.WriteFile(query, []byte("#!/bin/sh\n[ \"$1\" = installed ]\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d := &distro{id: "void", queryCmd: []string{query}}
+	if !d.installedPkg("installed") {
+		t.Fatal("successful xbps-query with no output must mean installed")
+	}
+	if d.installedPkg("missing") {
+		t.Fatal("failed xbps-query must mean missing")
 	}
 }
 

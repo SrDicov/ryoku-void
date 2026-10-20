@@ -1,0 +1,19 @@
+[Unit]
+# Restarts the display manager when it has lost its login screen: SDDM 0.21
+# reads a Wayland greeter that died as a finished login and starts nothing
+# afterwards, leaving an empty VT nobody can log in on. The guard watches for
+# the daemon running with no greeter and no session for a grace period and
+# restarts it, a few times per boot at most, logging why
+# (ryoku/lockscreen/sddm/ryoku-greeter-guard).
+Description=Ryoku login screen guard (restarts SDDM when its greeter is gone)
+After=display-manager.service
+Wants=display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/share/ryoku/lockscreen/ryoku-greeter-guard
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical.target

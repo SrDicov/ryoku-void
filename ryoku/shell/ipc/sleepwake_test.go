@@ -54,7 +54,7 @@ func fakeInitiallyHungPowerProvider(t *testing.T, countPath string) {
 	provider := filepath.Join(bin, "ryoku-wm-testwm")
 	script := "#!/usr/bin/env bash\n" +
 		"if [[ \"$1\" == caps ]]; then printf '%s' '{\"name\":\"testwm\",\"supports\":[\"outputPower\"]}'; exit 0; fi\n" +
-		"n=0; [[ -r \"" + countPath + "\" ]] && n=$(<\"" + countPath + "\"); n=$((n+1)); printf '%s' \"$n\" >\"" + countPath + "\"\n" +
+		"n=0; [[ -r \"" + countPath + "\" ]] && n=$(<\"" + countPath + "\"); n=$((n+1)); tmp=\"" + countPath + ".tmp.$$\"; printf '%s' \"$n\" >\"$tmp\"; mv -f \"$tmp\" \"" + countPath + "\"\n" +
 		"if (( n == 1 )); then exec sleep 10; fi\n" +
 		"exit 0\n"
 	if err := os.WriteFile(provider, []byte(script), 0o755); err != nil {
@@ -575,6 +575,85 @@ func TestSuspendTransactionDropsBlockAfterSecureLock(t *testing.T) {
 	}
 }
 
+// TestSuspendWaitsForLogin1ToSeeTheRelease pins the #324 race: the daemon's
+// Suspend call must not overtake logind observing the closed block fd, so the
+// transaction polls the inhibitor list and only calls Suspend once the list
+// stops naming this process.
+func TestSuspendWaitsForLogin1ToSeeTheRelease(t *testing.T) {
+	oldPoll := blockReleasePoll
+	blockReleasePoll = 2 * time.Millisecond
+	defer func() { blockReleasePoll = oldPoll }()
+	events := make(chan string, 8)
+	block := &fakeSleepInhibitor{events: events, name: "block", heldState: true}
+	seen := 0
+	cycle := &sleepCycle{
+		delay: &fakeSleepInhibitor{heldState: true, max: 15 * time.Second},
+		block: block,
+		lock:  func(time.Time) error { return nil },
+		blockCleared: func(context.Context) (bool, error) {
+			seen++
+			if seen < 3 {
+				events <- "check"
+				return false, nil
+			}
+			events <- "check"
+			return true, nil
+		},
+		suspend: func(context.Context) error {
+			events <- "suspend"
+			return nil
+		},
+		now:  time.Now,
+		logf: func(string, ...any) {},
+	}
+
+	if err := cycle.requestSuspend(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"block.release", "check", "check", "check", "suspend"}
+	for _, w := range want {
+		if got := <-events; got != w {
+			t.Fatalf("event = %q, want %q", got, w)
+		}
+	}
+}
+
+// TestSuspendAbortsWhenReleaseIsNeverSeen pins the denial bound: if login1
+// keeps reporting the released block, the transaction gives up inside its
+// window, never calls Suspend (so it cannot be denied again), and restores
+// the guard for the next attempt.
+func TestSuspendAbortsWhenReleaseIsNeverSeen(t *testing.T) {
+	block := &fakeSleepInhibitor{name: "block", heldState: true}
+	oldWait, oldPoll := blockReleaseWait, blockReleasePoll
+	blockReleaseWait, blockReleasePoll = 60*time.Millisecond, 5*time.Millisecond
+	defer func() { blockReleaseWait, blockReleasePoll = oldWait, oldPoll }()
+	suspendCalls := 0
+	cycle := &sleepCycle{
+		delay: &fakeSleepInhibitor{heldState: true, max: 15 * time.Second},
+		block: block,
+		lock:  func(time.Time) error { return nil },
+		blockCleared: func(context.Context) (bool, error) {
+			return false, nil
+		},
+		suspend: func(context.Context) error {
+			suspendCalls++
+			return nil
+		},
+		now:  time.Now,
+		logf: func(string, ...any) {},
+	}
+
+	if err := cycle.requestSuspend(); err == nil {
+		t.Fatal("a never-confirmed release was reported as success")
+	}
+	if suspendCalls != 0 {
+		t.Fatalf("login1 was called %d times after an unconfirmed release", suspendCalls)
+	}
+	if !block.held() {
+		t.Fatal("the aborted transaction left the sleep block down")
+	}
+}
+
 func TestSuspendTransactionRestoresBlockWhenLogin1Rejects(t *testing.T) {
 	events := make(chan string, 5)
 	block := &fakeSleepInhibitor{events: events, name: "block", heldState: true}
@@ -925,6 +1004,29 @@ func TestUnlockIsRejectedDuringSleepOrAnInactiveSession(t *testing.T) {
 	})
 }
 
+func TestUnlockPrepareKicksFallbackGuardWatcher(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_SESSION_ID", "unlock-kick")
+	cycle := &sleepCycle{
+		block: &fakeSleepInhibitor{heldState: true},
+		delay: &fakeSleepInhibitor{heldState: true},
+	}
+	cycle.setSessionActive(true)
+	d := &daemon{
+		sleep:     cycle,
+		guardKick: make(chan struct{}, 1),
+	}
+
+	if got := d.dispatch("unlock-prepare session unlock-kick"); got != "ok" {
+		t.Fatalf("unlock prepare = %q, want ok", got)
+	}
+	select {
+	case <-d.guardKick:
+	default:
+		t.Fatal("unlock prepare did not kick the fallback guard watcher")
+	}
+}
+
 func TestResumeClearsSleepPhaseBeforeUnlock(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("XDG_SESSION_ID", "resume-test")
@@ -1159,8 +1261,144 @@ func TestSessionActivationReacquiresGlobalBlock(t *testing.T) {
 	<-done
 }
 
+// An idle session must not pay for this watcher. Both questions it asks cost
+// a process, and on a fixed 100 ms tick that was twenty forks a second from
+// login until logout (#411). The numbers here are the point: at the old rate
+// a second and a half is fifteen rounds, so anything near that means the
+// easing off is gone.
+func TestUnlockFallbackGuardStopsAskingWhileNothingHappens(t *testing.T) {
+	t.Setenv("XDG_SESSION_ID", "session-c")
+	cycle := &sleepCycle{
+		block: &fakeSleepInhibitor{heldState: true},
+		delay: &fakeSleepInhibitor{heldState: true},
+	}
+	cycle.setSessionActive(true)
+	d := &daemon{quit: make(chan struct{})}
+	d.setSleepCycle(cycle)
+
+	oldActive, oldStop := qylockUnlockGuardActive, qylockUnlockGuardStop
+	oldRunning := lockProcessRunning
+	defer func() {
+		qylockUnlockGuardActive, qylockUnlockGuardStop = oldActive, oldStop
+		lockProcessRunning = oldRunning
+	}()
+
+	var mu sync.Mutex
+	asked := 0
+	looked := 0
+	// The steady state of an unlocked session: no lock screen, no guard, and
+	// nothing that will ever change on its own.
+	lockProcessRunning = func() bool {
+		mu.Lock()
+		looked++
+		mu.Unlock()
+		return false
+	}
+	qylockUnlockGuardActive = func(string) bool {
+		mu.Lock()
+		asked++
+		mu.Unlock()
+		return false
+	}
+	qylockUnlockGuardStop = func(string) error {
+		t.Error("released a guard that was never there")
+		return nil
+	}
+
+	go d.releaseQylockUnlockGuardWhenReady()
+	defer close(d.quit)
+	time.Sleep(1500 * time.Millisecond)
+
+	mu.Lock()
+	gotLooked, gotAsked := looked, asked
+	mu.Unlock()
+	if gotLooked > 8 {
+		t.Fatalf("ran pgrep %d times in 1.5s; a fixed 100ms tick is 15 and the point is to be far under it", gotLooked)
+	}
+	if gotAsked > 8 {
+		t.Fatalf("ran ryoku-host %d times in 1.5s; the watcher is still asking on every tick", gotAsked)
+	}
+	if gotLooked == 0 {
+		t.Fatal("never looked at all; the watcher has to keep a slow eye out for a guard that reappears")
+	}
+}
+
+func TestUnlockFallbackGuardKickRousesIdleWatcher(t *testing.T) {
+	t.Setenv("XDG_SESSION_ID", "session-kick")
+	oldPoll, oldPollMax := qylockGuardPoll, qylockGuardPollMax
+	qylockGuardPoll = 10 * time.Millisecond
+	qylockGuardPollMax = 10 * time.Second
+	t.Cleanup(func() {
+		qylockGuardPoll, qylockGuardPollMax = oldPoll, oldPollMax
+	})
+
+	cycle := &sleepCycle{
+		block: &fakeSleepInhibitor{heldState: true},
+		delay: &fakeSleepInhibitor{heldState: true},
+	}
+	cycle.setSessionActive(true)
+	d := &daemon{
+		quit:      make(chan struct{}),
+		guardKick: make(chan struct{}, 1),
+	}
+	d.setSleepCycle(cycle)
+
+	oldActive, oldStop := qylockUnlockGuardActive, qylockUnlockGuardStop
+	oldRunning := lockProcessRunning
+	t.Cleanup(func() {
+		qylockUnlockGuardActive, qylockUnlockGuardStop = oldActive, oldStop
+		lockProcessRunning = oldRunning
+	})
+
+	checks := make(chan struct{}, 8)
+	lockProcessRunning = func() bool {
+		select {
+		case checks <- struct{}{}:
+		default:
+		}
+		return false
+	}
+	qylockUnlockGuardActive = func(string) bool { return false }
+	qylockUnlockGuardStop = func(string) error {
+		t.Error("released a guard that was never there")
+		return nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		d.releaseQylockUnlockGuardWhenReady()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		close(d.quit)
+		<-done
+	})
+
+	// Six empty checks leave the next timer 640 ms away. The kick must reset
+	// that idle wait rather than leaving unlock cleanup behind it.
+	for range 6 {
+		select {
+		case <-checks:
+		case <-time.After(time.Second):
+			t.Fatal("watcher did not reach its idle backoff")
+		}
+	}
+	d.guardKick <- struct{}{}
+	select {
+	case <-checks:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("guard kick did not rouse the idle watcher")
+	}
+}
+
 func TestUnlockFallbackGuardReleasedOnlyByReadyOwningSession(t *testing.T) {
 	t.Setenv("XDG_SESSION_ID", "session-b")
+	oldPoll, oldPollMax := qylockGuardPoll, qylockGuardPollMax
+	qylockGuardPoll = 10 * time.Millisecond
+	qylockGuardPollMax = 20 * time.Millisecond
+	t.Cleanup(func() {
+		qylockGuardPoll, qylockGuardPollMax = oldPoll, oldPollMax
+	})
 	cycle := &sleepCycle{
 		block: &fakeSleepInhibitor{heldState: true},
 		delay: &fakeSleepInhibitor{heldState: true},
@@ -1171,10 +1409,10 @@ func TestUnlockFallbackGuardReleasedOnlyByReadyOwningSession(t *testing.T) {
 
 	oldActive, oldStop := qylockUnlockGuardActive, qylockUnlockGuardStop
 	oldRunning := lockProcessRunning
-	defer func() {
+	t.Cleanup(func() {
 		qylockUnlockGuardActive, qylockUnlockGuardStop = oldActive, oldStop
 		lockProcessRunning = oldRunning
-	}()
+	})
 	var mu sync.Mutex
 	present := true
 	clientRunning := true
@@ -1196,8 +1434,15 @@ func TestUnlockFallbackGuardReleasedOnlyByReadyOwningSession(t *testing.T) {
 		defer mu.Unlock()
 		return clientRunning
 	}
-	go d.releaseQylockUnlockGuardWhenReady()
-	defer close(d.quit)
+	done := make(chan struct{})
+	go func() {
+		d.releaseQylockUnlockGuardWhenReady()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		close(d.quit)
+		<-done
+	})
 
 	select {
 	case unit := <-stopped:

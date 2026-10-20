@@ -1,0 +1,31 @@
+id	label	group	group_label	packages	desktop_ids	default	step	needs_network	editions	lock_editions	lock_reason	detail
+ryotunes	Ryotunes	ryoku-apps	Ryoku apps	ryotunes	-	on	apps	false	*	-	-	music player
+ryoport	Ryoport	ryoku-apps	Ryoku apps	-	ryovm.desktop	on	apps	false	*	-	-	VMs, SSH and serial consoles in one dashboard
+ryomanager	RyoManager	ryoku-apps	Ryoku apps	ryomanager	-	on	apps	false	*	-	-	system monitor and task manager
+terminal	Kitty	required	System (required)	kitty	-	on	apps	false	*	*	the Ryoku terminal role: the launcher, Settings, and open in terminal use it	-
+editor	Neovim	required	System (required)	neovim	-	on	apps	false	*	*	the Ryoku editor role: the launcher opens kitty -e nvim	-
+monitor	btop monitor	required	System (required)	btop	-	on	apps	false	*	*	the CPU, GPU, and battery panels open it in the terminal	-
+prompt	Starship prompt	terminal	Terminal	starship	-	on	apps	false	*	-	-	the Ryoku shell prompt
+fastfetch	Fastfetch	terminal	Terminal	fastfetch	-	on	apps	false	*	-	-	system summary card in the launcher and RyoStore covers
+yazi	Yazi	terminal	Terminal	yazi	-	on	apps	false	*	-	-	terminal file manager
+cli-tools	Modern CLI tools	terminal	Terminal	eza,bat,fzf,zoxide	-	on	apps	false	*	-	-	ls and cat replacements; fuzzy history and directory search
+git-tools	Git tools	terminal	Terminal	github-cli,lazygit	-	on	apps	false	*	-	-	the gh CLI and lazygit terminal UI
+pavucontrol	PulseAudio GUI	media	Media & tools	pavucontrol	-	on	apps	false	*	-	-	the mixer the bar's audio button opens
+songrec	Songrec	media	Media & tools	songrec	-	on	apps	false	*	-	-	Recognize Music in the launcher
+openrgb	OpenRGB	media	Media & tools	openrgb	-	on	apps	false	*	-	-	keyboard and mouse lighting follows the wallpaper palette
+upscale	AI upscale	media	Media & tools	waifu2x-ncnn-vulkan	-	on	apps	false	*	-	-	ryoshot Beautify HD and ryowalls Enhance
+localsend	LocalSend	media	Media & tools	localsend-bin	-	on	apps	false	arch,cachyos	-	-	LAN file sharing; AUR
+voxtype	Voxtype	media	Media & tools	voxtype-bin	-	on	apps	false	arch,cachyos	-	-	voice dictation on Super+`; AUR
+gamescope	Gamescope	gaming	Gaming	gamescope	-	on	apps	false	*	-	-	nested gaming micro-compositor
+gamemode	GameMode	gaming	Gaming	gamemode	-	on	apps	false	*	-	-	performance governor used by Steam
+mangohud	MangoHud	gaming	Gaming	mangohud	-	on	apps	false	*	-	-	in-game FPS and frametime overlay
+controllers	Game controllers	gaming	Gaming	xpadneo-dkms,game-devices-udev	-	on	apps	false	*	-	-	wireless Xbox pads and controller access rules
+vm	Virtual machines	services	System services	qemu-desktop,edk2-ovmf,virglrenderer	-	on	apps	false	*	-	-	the VM behind Ryoku Settings > GPU > Machine
+docker	Docker	services	System services	docker	-	on	apps	false	*	-	-	the Cobalt engine the file stash uses
+flatpak	Flatpak	services	System services	flatpak	-	on	apps	false	*	-	-	portable app channel
+go	Go toolchain	developer	Developer toolchains	go	-	on	apps	false	*	-	-	-
+node	Node.js + npm	developer	Developer toolchains	nodejs,npm	-	on	apps	false	*	-	-	-
+pytools	Python pip + pipx	developer	Developer toolchains	python-pip,python-pipx	-	on	apps	false	*	-	-	-
+mise	mise	developer	Developer toolchains	mise	-	on	apps	false	*	-	-	language and version manager
+rashin	Rashin	rashin	Rashin	ryoku-rashin	-	on	rashin	false	*	-	-	Ryoku's AI agent
+cachyos-layer	CachyOS kernel and tuning	cachyos-layer	CachyOS layer	linux-cachyos,linux-cachyos-headers,cachyos-settings,ananicy-cpp,cachyos-ananicy-rules,scx-scheds,proton-cachyos-native	-	off	cachyos-layer	true	arch	-	-	CachyOS repositories, kernel, tuning, schedulers, and Proton

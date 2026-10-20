@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=RyoManager
+GenericName=System Monitor
+Comment=View system performance and manage processes
+Exec=ryomanager
+Icon=ryomanager
+Terminal=false
+Categories=System;Monitor;
+StartupNotify=true

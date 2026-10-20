@@ -6,7 +6,9 @@ import Quickshell.Wayland
 import Ryoku.Blobs
 import Ryoku.Ui.Singletons
 import shell.services
+import shell.modules.stage.frame
 import "framebars/RailGeometry.js" as RailGeometry
+import "../../services/lib/screens.js" as Screens
 
 // One monitor's frame bar. It maps four exclusive-zone background surfaces that
 // reserve the revealed bar's thickness (so tiled windows clear the rails) and a
@@ -40,18 +42,28 @@ Scope {
     readonly property real uiScale: Tokens.uiScaleFor(root.modelData ? root.modelData.name : "")
     readonly property bool barEnabled: Tokens.barEnabledFor(
         root.modelData ? root.modelData.name : "")
-    readonly property bool qsbarPrimaryHost: Config.barStyle === "qsbar"
-        && root.modelData
+    // The screen that hosts whole-desktop surfaces: the primary output. QS Bar
+    // needs it even when its bar is hidden (its popups/notifications live
+    // there), and so does any frame-family style (iRiS): the scene is one
+    // island, dock and popup system for the desktop, not a per-screen bar, so
+    // hiding a monitor's bar must not blank the whole shell.
+    readonly property bool primaryHost: root.modelData
         && ShellState.screens.length > 0
         && ShellState.screens[0].name === root.modelData.name
+        && (Config.barStyle === "qsbar" || BarProducts.isFrameFamily(Config.barStyle))
 
-    // The built-in Sumi frame scene draws only while the active bar style is the
-    // built-in one; a receipt-owned style would load its own scene without rails.
-    readonly property bool sumiActive: BarProducts.sceneUrl(Config.barStyle) === ""
+    // The built-in Sumi frame scene draws while the active bar style is the
+    // built-in one, or while a broken style has degraded to it; a healthy
+    // receipt-owned style loads its own scene instead.
+    readonly property bool sumiActive: root.degraded
+        || BarProducts.sceneUrl(Config.barStyle) === ""
 
-    // A transient Loader.Error on a builtin style must not stick us on sumi; count
-    // retries so a genuinely broken style still degrades gracefully after ~8s.
+    // A transient Loader.Error on a builtin style must not stick us on sumi;
+    // count retries so a hiccup self-heals. Once a builtin is genuinely broken
+    // (retries spent), BarProducts records it and every monitor degrades to the
+    // painted sumi rail instead of an empty frame, until the style changes.
     property int barStyleRetries: 0
+    readonly property bool degraded: BarProducts.brokenStyle === Config.barStyle
 
     readonly property var state: root.modelData ? ShellState.forScreen(root.modelData) : null
     readonly property bool revealed: root.state ? root.state.barRevealed : true
@@ -85,6 +97,26 @@ Scope {
         const rail = Config.normalizedFrameBars.rails[edge];
         return !!(rail && rail.reveal);
     }
+    // Framing reveals the painted rail without changing the reservation window.
+    // That keeps client geometry still while the complete desktop is in the card.
+    function edgeDrawRevealed(edge) {
+        const screenName = root.modelData ? root.modelData.name : "";
+        if (!StageFrame.framing(screenName))
+            return root.edgeRevealed(edge);
+        const rail = Config.normalizedFrameBars.rails[edge];
+        return !!(rail && rail.reveal);
+    }
+
+    function edgeDrawReserve(edge) {
+        if (!root.barEnabled)
+            return 0;
+        const rail = Config.normalizedFrameBars.rails[edge];
+        if (!rail)
+            return 0;
+        if (!root.edgeDrawRevealed(edge))
+            return 1;
+        return ((rail.enabled && root.railHasWidgets(rail, edge)) ? rail.size * root.uiScale : 1) + root.frameBorderPx;
+    }
 
     function railHasWidgets(rail, edge) {
         if (!rail)
@@ -110,6 +142,25 @@ Scope {
         return ((rail.enabled && root.railHasWidgets(rail, edge)) ? rail.size * root.uiScale : 1) + root.frameBorderPx;
     }
 
+    readonly property var sidebarRailClearances: !root.barEnabled ? ({
+        top: 0, left: 0, bottom: 0, right: 0
+    }) : root.sumiActive ? ({
+        top: overlay.railClearance("top"),
+        left: overlay.railClearance("left"),
+        bottom: overlay.railClearance("bottom"),
+        right: overlay.railClearance("right")
+    }) : (overlay.qsBarEdge === "bottom"
+        ? ({ top: 0, left: 0, bottom: 52, right: 0 })
+        : ({ top: 52, left: 0, bottom: 0, right: 0 }))
+
+    function syncSidebarRailClearances() {
+        if (root.modelData)
+            SidebarState.setRailClearances(root.modelData, root.sidebarRailClearances);
+    }
+
+    onSidebarRailClearancesChanged: root.syncSidebarRailClearances()
+    Component.onCompleted: Qt.callLater(root.syncSidebarRailClearances)
+
     // Four background reservation surfaces, mapped top, bottom, left, right in
     // that fixed order so the horizontal edges own the shared corners.
     FrameEdge { edge: "top";    screen: root.modelData; reserve: root.sumiActive ? root.edgeReserve("top") : 0 }
@@ -120,7 +171,13 @@ Scope {
     PanelWindow {
         id: overlay
 
-        readonly property real s: (root.modelData ? root.modelData.height / 1080 : 1) * Math.max(0.7, Math.min(1.6, Config.fontScale))
+        // Physical panel height (Quickshell's is logical: a logical-only term
+        // shrinks the popouts and the needle panel as the display scale rises),
+        // the accessibility font scale, and this monitor's interface scale, so
+        // the popout chrome matches the rails it grows out of.
+        readonly property real s: Screens.monitorScale(root.modelData,
+            Wm.outputScale(root.modelData ? root.modelData.name : ""))
+            * Math.max(0.7, Math.min(1.6, Config.fontScale)) * root.uiScale
         readonly property var frameBars: Config.normalizedFrameBars
         // Read through `overlay.` and keep the rail host's id distinct: an id
         // shadows a same-named property in this scope, which once left every rail
@@ -131,17 +188,30 @@ Scope {
         // fold qsbar's shared menus to whichever edge its bar sits on
         readonly property string qsBarEdge: (!root.sumiActive && Config.qsbar && Config.qsbar.barPosition === "bottom") ? "bottom" : "top"
         readonly property var edgeReveal: ({
-            top: root.edgeRevealed("top"),
-            bottom: root.edgeRevealed("bottom"),
-            left: root.edgeRevealed("left"),
-            right: root.edgeRevealed("right")
+            top: root.edgeDrawRevealed("top"),
+            bottom: root.edgeDrawRevealed("bottom"),
+            left: root.edgeDrawRevealed("left"),
+            right: root.edgeDrawRevealed("right")
         })
         readonly property var topRailRect: RailGeometry.edgeRect("top", overlay.railThickness("top"), width, height)
         readonly property var leftRailRect: RailGeometry.edgeRect("left", overlay.railThickness("left"), width, height)
         readonly property var bottomRailRect: RailGeometry.edgeRect("bottom", overlay.railThickness("bottom"), width, height)
         readonly property var rightRailRect: RailGeometry.edgeRect("right", overlay.railThickness("right"), width, height)
+        // The frame chrome is a full-output surface, so its framed layer keeps
+        // the same extent and only maps the painted edges into the Stage card.
+        function framedRect(rect) {
+            return frameLayer.maskRect(rect.x, rect.y, rect.width, rect.height);
+        }
+        readonly property rect framedTopRailRect: overlay.framedRect(overlay.topRailRect)
+        readonly property rect framedLeftRailRect: overlay.framedRect(overlay.leftRailRect)
+        readonly property rect framedBottomRailRect: overlay.framedRect(overlay.bottomRailRect)
+        readonly property rect framedRightRailRect: overlay.framedRect(overlay.rightRailRect)
+        readonly property rect framedTopHoverRect: frameLayer.maskRect(0, 0, overlay.width, 1)
+        readonly property rect framedBottomHoverRect: frameLayer.maskRect(0, overlay.height - 1, overlay.width, 1)
+        readonly property rect framedLeftHoverRect: frameLayer.maskRect(0, 0, 1, overlay.height)
+        readonly property rect framedRightHoverRect: frameLayer.maskRect(overlay.width - 1, 0, 1, overlay.height)
         function railRecord(edge) { return overlay.rails[edge] || ({ size: 0, enabled: false }); }
-        function railThickness(edge) { return Math.max(0, root.edgeReserve(edge) - root.frameBorderPx); }
+        function railThickness(edge) { return Math.max(0, root.edgeDrawReserve(edge) - root.frameBorderPx); }
         function railEnabled(edge) {
             return root.barEnabled && overlay.railRecord(edge).enabled === true;
         }
@@ -162,9 +232,6 @@ Scope {
         // True when this monitor's active workspace holds a fullscreen window;
         // the frame then unmaps its input and hides so the window is unobstructed.
         readonly property bool monFullscreen: Wm.outputHasFullscreen(root.modelData ? root.modelData.name : "")
-        // The record island through its loader: null until the session's first
-        // recording flow, and every mask binding reads it guarded.
-        readonly property Item hud: hudLoader.item
 
         onMonFullscreenChanged: if (monFullscreen) frameMenus.closeAll()
 
@@ -184,9 +251,8 @@ Scope {
         // dragging island or any visible menu widens the mask to the whole
         // surface so the pointer never slips off its rect mid-interaction.
         mask: overlay.monFullscreen ? hiddenRegion
-            : (frameMenus.anyVisible || (overlay.hud && overlay.hud.dragging)) ? fullRegion
+            : frameMenus.anyVisible ? fullRegion
             : root.sumiActive ? railRegion
-            : (Recorder.anyActive || Recorder.chooserOpen) ? recRegion
             : dragRegion
 
         Region { id: hiddenRegion }
@@ -197,17 +263,16 @@ Scope {
         }
         Region {
             id: railRegion
-            Region { x: overlay.topRailRect.x; y: overlay.topRailRect.y; width: overlay.railEnabled("top") ? overlay.topRailRect.width : 0; height: overlay.railEnabled("top") ? overlay.topRailRect.height : 0 }
-            Region { x: overlay.leftRailRect.x; y: overlay.leftRailRect.y; width: overlay.railEnabled("left") ? overlay.leftRailRect.width : 0; height: overlay.railEnabled("left") ? overlay.leftRailRect.height : 0 }
-            Region { x: overlay.bottomRailRect.x; y: overlay.bottomRailRect.y; width: overlay.railEnabled("bottom") ? overlay.bottomRailRect.width : 0; height: overlay.railEnabled("bottom") ? overlay.bottomRailRect.height : 0 }
-            Region { x: overlay.rightRailRect.x; y: overlay.rightRailRect.y; width: overlay.railEnabled("right") ? overlay.rightRailRect.width : 0; height: overlay.railEnabled("right") ? overlay.rightRailRect.height : 0 }
-            // 1px hover strips at each screen edge, always exposed so a hidden bar
-            // (reserve released, band mask gone) can still be revealed by pointer
-            // proximity.
-            Region { x: 0; y: 0; width: overlay.railEnabled("top") ? overlay.width : 0; height: overlay.railEnabled("top") ? 1 : 0 }
-            Region { x: 0; y: overlay.height - 1; width: overlay.railEnabled("bottom") ? overlay.width : 0; height: overlay.railEnabled("bottom") ? 1 : 0 }
-            Region { x: 0; y: 0; width: overlay.railEnabled("left") ? 1 : 0; height: overlay.railEnabled("left") ? overlay.height : 0 }
-            Region { x: overlay.width - 1; y: 0; width: overlay.railEnabled("right") ? 1 : 0; height: overlay.railEnabled("right") ? overlay.height : 0 }
+            Region { x: overlay.framedTopRailRect.x; y: overlay.framedTopRailRect.y; width: overlay.railEnabled("top") ? overlay.framedTopRailRect.width : 0; height: overlay.railEnabled("top") ? overlay.framedTopRailRect.height : 0 }
+            Region { x: overlay.framedLeftRailRect.x; y: overlay.framedLeftRailRect.y; width: overlay.railEnabled("left") ? overlay.framedLeftRailRect.width : 0; height: overlay.railEnabled("left") ? overlay.framedLeftRailRect.height : 0 }
+            Region { x: overlay.framedBottomRailRect.x; y: overlay.framedBottomRailRect.y; width: overlay.railEnabled("bottom") ? overlay.framedBottomRailRect.width : 0; height: overlay.railEnabled("bottom") ? overlay.framedBottomRailRect.height : 0 }
+            Region { x: overlay.framedRightRailRect.x; y: overlay.framedRightRailRect.y; width: overlay.railEnabled("right") ? overlay.framedRightRailRect.width : 0; height: overlay.railEnabled("right") ? overlay.framedRightRailRect.height : 0 }
+            // The reveal lips follow the card too; leaving them at the physical
+            // edge makes a hidden rail impossible to reach in the editor.
+            Region { x: overlay.framedTopHoverRect.x; y: overlay.framedTopHoverRect.y; width: overlay.railEnabled("top") ? overlay.framedTopHoverRect.width : 0; height: overlay.railEnabled("top") ? overlay.framedTopHoverRect.height : 0 }
+            Region { x: overlay.framedBottomHoverRect.x; y: overlay.framedBottomHoverRect.y; width: overlay.railEnabled("bottom") ? overlay.framedBottomHoverRect.width : 0; height: overlay.railEnabled("bottom") ? overlay.framedBottomHoverRect.height : 0 }
+            Region { x: overlay.framedLeftHoverRect.x; y: overlay.framedLeftHoverRect.y; width: overlay.railEnabled("left") ? overlay.framedLeftHoverRect.width : 0; height: overlay.railEnabled("left") ? overlay.framedLeftHoverRect.height : 0 }
+            Region { x: overlay.framedRightHoverRect.x; y: overlay.framedRightHoverRect.y; width: overlay.railEnabled("right") ? overlay.framedRightHoverRect.width : 0; height: overlay.railEnabled("right") ? overlay.framedRightHoverRect.height : 0 }
             // frame menus: each open menu unions its trigger (owner) and body
             // rects so the click target and the open body keep catching input;
             // idle anchors stay zero-size and click through.
@@ -227,24 +292,9 @@ Scope {
             Region { x: frameMenus.masks["bottom-left"].bx; y: frameMenus.masks["bottom-left"].by; width: frameMenus.masks["bottom-left"].bw; height: frameMenus.masks["bottom-left"].bh }
             Region { x: frameMenus.masks["bottom-right"].tx; y: frameMenus.masks["bottom-right"].ty; width: frameMenus.masks["bottom-right"].tw; height: frameMenus.masks["bottom-right"].th }
             Region { x: frameMenus.masks["bottom-right"].bx; y: frameMenus.masks["bottom-right"].by; width: frameMenus.masks["bottom-right"].bw; height: frameMenus.masks["bottom-right"].bh }
-            // record island: its resting card and the tucked-nub reveal strip.
-            Region { x: overlay.hud ? overlay.hud.hudX : 0; y: overlay.hud ? overlay.hud.hudY : 0; width: ((Recorder.anyActive || Recorder.chooserOpen) && overlay.hud && overlay.hud.prog > 0.25) ? overlay.hud.hudW : 0; height: ((Recorder.anyActive || Recorder.chooserOpen) && overlay.hud && overlay.hud.prog > 0.25) ? overlay.hud.hudH : 0 }
-            Region { x: overlay.hud ? overlay.hud.trigX : 0; y: overlay.hud ? overlay.hud.trigY : 0; width: Recorder.anyActive && overlay.hud ? overlay.hud.trigW : 0; height: Recorder.anyActive && overlay.hud ? overlay.hud.trigH : 0 }
             // right edge stays masked so a file drag lands on the DropArea below.
             Region { x: overlay.width - overlay.rightDropW; y: 0; width: overlay.rightDropOn ? overlay.rightDropW : 0; height: overlay.rightDropOn ? overlay.height : 0 }
             // centred plugin popout: no edge anchor, so its body rides here.
-            Region { x: frameMenus.pluginMask.x; y: frameMenus.pluginMask.y; width: frameMenus.pluginMask.w; height: frameMenus.pluginMask.h }
-        }
-
-        // Record island only, for a folder bar style (sumi frame + rails off). The
-        // dock preview body rides along so its live tiles stay hoverable while a
-        // recording HUD owns the mask.
-        Region {
-            id: recRegion
-            Region { x: overlay.hud ? overlay.hud.hudX : 0; y: overlay.hud ? overlay.hud.hudY : 0; width: ((Recorder.anyActive || Recorder.chooserOpen) && overlay.hud && overlay.hud.prog > 0.25) ? overlay.hud.hudW : 0; height: ((Recorder.anyActive || Recorder.chooserOpen) && overlay.hud && overlay.hud.prog > 0.25) ? overlay.hud.hudH : 0 }
-            Region { x: overlay.hud ? overlay.hud.trigX : 0; y: overlay.hud ? overlay.hud.trigY : 0; width: Recorder.anyActive && overlay.hud ? overlay.hud.trigW : 0; height: Recorder.anyActive && overlay.hud ? overlay.hud.trigH : 0 }
-            Region { x: frameMenus.dockMask.x; y: frameMenus.dockMask.y; width: frameMenus.dockMask.w; height: frameMenus.dockMask.h }
-            Region { x: frameMenus.musicMask.x; y: frameMenus.musicMask.y; width: frameMenus.musicMask.w; height: frameMenus.musicMask.h }
             Region { x: frameMenus.pluginMask.x; y: frameMenus.pluginMask.y; width: frameMenus.pluginMask.w; height: frameMenus.pluginMask.h }
         }
 
@@ -301,8 +351,9 @@ Scope {
             visible: !overlay.monFullscreen
             Keys.onEscapePressed: if (frameMenus.keyboardMode === "exclusive") frameMenus.closeAll()
 
+
             // Shared blob field for retained Ryoku-owned credential, voice,
-            // stash, capture, and rail-card popouts plus RecordHud.
+            // stash, capture, and rail-card popouts.
             BlobGroup {
                 id: blobGroup
                 color: Theme.surface
@@ -329,15 +380,31 @@ Scope {
                     && width > 0 && height > 0
             }
 
+            StageFramedLayer {
+                id: frameLayer
+                interactive: false
+                screenName: overlay.screen?.name ?? ""
+                edge: "top"
+                restThickness: overlay.screen?.height ?? 1080
+                screenWidth: overlay.screen?.width ?? 1920
+                screenHeight: overlay.screen?.height ?? 1080
+            }
+
             FrameChrome {
+                parent: frameLayer.rest
                 // The painted frame band: per-edge thickness = that edge's reserve
                 // (bar band + border), the 2px outline stroked just inside the hole
                 // edge, inner corners arced at radiusWindow.
                 anchors.fill: parent
-                reserveTop: root.sumiActive ? root.edgeReserve("top") : root.frameBorderPx
-                reserveBottom: root.sumiActive ? root.edgeReserve("bottom") : root.frameBorderPx
-                reserveLeft: root.sumiActive ? root.edgeReserve("left") : root.frameBorderPx
-                reserveRight: root.sumiActive ? root.edgeReserve("right") : root.frameBorderPx
+                // No sumiActive arm: this item's own visible below requires it, so
+                // the band is never painted without it and a fallback thickness
+                // would describe a frame nobody sees. The reserves at the top of
+                // the file are the opposite case and keep theirs, because an
+                // exclusive zone is claimed whether or not anything is drawn.
+                reserveTop: root.edgeDrawReserve("top")
+                reserveBottom: root.edgeDrawReserve("bottom")
+                reserveLeft: root.edgeDrawReserve("left")
+                reserveRight: root.edgeDrawReserve("right")
                 holeRadius: Config.frameCorner
                 surface: Theme.surface
                 outline: Theme.outline
@@ -349,6 +416,7 @@ Scope {
 
             Bar {
                 id: frameRails
+                parent: frameLayer.rest
                 anchors.fill: parent
                 z: 1
                 visible: !overlay.monFullscreen && root.barEnabled && root.sumiActive
@@ -379,16 +447,7 @@ Scope {
                 group: blobGroup
                 topBar: !root.sumiActive || !root.barEnabled
                 barEdge: overlay.qsBarEdge
-                railClearances: !root.barEnabled ? ({
-                    top: 0, left: 0, bottom: 0, right: 0
-                }) : root.sumiActive ? ({
-                    top: overlay.railClearance("top"),
-                    left: overlay.railClearance("left"),
-                    bottom: overlay.railClearance("bottom"),
-                    right: overlay.railClearance("right")
-                }) : (overlay.qsBarEdge === "bottom"
-                    ? ({ top: 0, left: 0, bottom: 52, right: 0 })
-                    : ({ top: 52, left: 0, bottom: 0, right: 0 }))
+                railClearances: root.sidebarRailClearances
                 active: !overlay.monFullscreen
                 onSurfaceClosed: (id, context) => surfaceLifecycle.handleClosed(id, context)
 
@@ -406,7 +465,13 @@ Scope {
                             Quickshell.execDetached(["ryogami", "wallpaper", "ui"]);
                             return;
                         }
-                        frameMenus.openSurface(id, null, mon, ctx);
+                        // A request that carries a trigger opens welded to it,
+                        // the same as a rail widget's own menuRequested above.
+                        // Without one openSurface falls back to the record's
+                        // config anchor, which a non-sumi bar folds into a
+                        // screen corner.
+                        const anchorRect = ctx && ctx.ownerRect ? ctx.ownerRect : null;
+                        frameMenus.openSurface(id, anchorRect, mon, ctx);
                     }
                     function onSurfaceClosed(id, mon) { frameMenus.closeSurface(id, mon); }
                     function onKeyringPromptChanged(pid) { frameMenus.retireKeyringPrompt(pid); }
@@ -420,33 +485,6 @@ Scope {
             // plus the backdrop press above dismisses a click outside, and Escape
             // closes through the FocusScope.
 
-            // The record island: built for the first recording flow of the
-            // session (async, so opening the chooser never blocks on a build)
-            // and dropped 2 s after the flow ends, once the 620 ms melt has
-            // finished. The hold covers the beat between closing the chooser
-            // and the recorder starting, so the island is never destroyed
-            // mid-handoff.
-            Loader {
-                id: hudLoader
-                anchors.fill: parent
-                readonly property bool wanted: Recorder.anyActive || Recorder.chooserOpen || Recorder.countingDown
-                active: wanted || hudHold.running
-                onWantedChanged: if (!wanted && active) hudHold.restart()
-                sourceComponent: Component {
-                    RecordHud {
-                        id: recHud
-                        s: overlay.s
-                        clearanceTop: overlay.railClearance("top")
-                        clearanceBottom: overlay.railClearance("bottom")
-                        clearanceLeft: overlay.railClearance("left")
-                        clearanceRight: overlay.railClearance("right")
-                        laneDockEdge: root.dockLaneEdge
-                        laneDockSize: root.dockLaneSize
-                        laneDockCenter: root.dockLaneCenter
-                    }
-                }
-            }
-            Timer { id: hudHold; interval: 2000 }
         }
     }
 
@@ -456,24 +494,34 @@ Scope {
     // host still map (topBar mode) so menus and surfaces stay style-agnostic.
     Loader {
         id: barStyleLoader
-        active: !root.sumiActive && (root.barEnabled || root.qsbarPrimaryHost)
+        active: !root.sumiActive && (root.barEnabled || root.primaryHost)
         source: BarProducts.sceneUrl(Config.barStyle)
         onLoaded: {
             root.barStyleRetries = 0
             if (item) item.modelData = root.modelData
         }
-        // A builtin style (qsbar) cannot be legitimately broken: a load error is a
-        // transient hiccup (an update's config/plugin swap, a cold-start race), so
-        // retry instead of permanently dropping to the sumi rail. A store-installed
-        // style that errors is genuinely broken → fail() it as before.
+        // A builtin style cannot be legitimately broken: a load error is a
+        // transient hiccup (an update's config/plugin swap, a cold-start
+        // import race), so retry it. Once retries are spent the style is
+        // genuinely broken on this box: degrade to the painted sumi rail so
+        // the user keeps a working bar instead of an empty frame, and record
+        // it so the Hub can say so. A store style that errors is failed as
+        // before (sceneUrl then returns "" and sumi draws). Both marks flip
+        // this Loader's own `active`, so they land after the status change
+        // settles instead of inside it.
         onStatusChanged: {
             if (status !== Loader.Error)
                 return;
-            if (BarProducts.isBuiltin(Config.barStyle) && root.barStyleRetries < 10) {
-                root.barStyleRetries++;
-                barStyleReload.restart();
+            const style = Config.barStyle;
+            if (BarProducts.isBuiltin(style)) {
+                if (root.barStyleRetries < 10) {
+                    root.barStyleRetries++;
+                    barStyleReload.restart();
+                } else {
+                    Qt.callLater(BarProducts.markBroken, style);
+                }
             } else {
-                BarProducts.fail(Config.barStyle);
+                Qt.callLater(BarProducts.fail, style);
             }
         }
     }
@@ -483,14 +531,25 @@ Scope {
         onTriggered: {
             barStyleLoader.active = false;
             barStyleLoader.active = Qt.binding(
-                () => !root.sumiActive && (root.barEnabled || root.qsbarPrimaryHost));
+                () => !root.sumiActive && (root.barEnabled || root.primaryHost));
         }
     }
     Connections {
         target: root
         function onModelDataChanged() {
+            root.syncSidebarRailClearances();
             if (barStyleLoader.item)
                 barStyleLoader.item.modelData = root.modelData;
+        }
+    }
+    // A new pick gets a fresh set of retries; a style that broke earlier is
+    // tried again once the user picks it again.
+    Connections {
+        target: Config
+        function onBarStyleChanged() {
+            root.barStyleRetries = 0;
+            if (BarProducts.brokenStyle !== Config.barStyle)
+                BarProducts.brokenStyle = "";
         }
     }
 }

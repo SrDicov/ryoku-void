@@ -1,0 +1,79 @@
+#!/bin/sh
+
+refresh_caches() {
+	if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+		gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+	fi
+	if command -v update-desktop-database >/dev/null 2>&1; then
+		update-desktop-database -q /usr/share/applications 2>/dev/null || true
+	fi
+}
+
+session_running() {
+	command -v pgrep >/dev/null 2>&1 || return 1
+	pgrep -x ryoku-shell >/dev/null 2>&1 ||
+		pgrep -x ryoku-clamshell >/dev/null 2>&1 ||
+		pgrep -x ryoku-idle >/dev/null 2>&1
+}
+
+
+tune_host() {
+	if command -v ryoku-bluetooth-tune >/dev/null 2>&1; then
+		ryoku-bluetooth-tune >/dev/null 2>&1 || true
+		if command -v sv >/dev/null 2>&1 &&
+		   sv status /etc/sv/bluetoothd 2>/dev/null | grep -q '^run:'; then
+			sv restart /etc/sv/bluetoothd >/dev/null 2>&1 || true
+		fi
+	fi
+	if command -v ryoku-wifi-regdom >/dev/null 2>&1; then
+		ryoku-wifi-regdom apply >/dev/null 2>&1 || true
+	fi
+	if command -v ryoku-hw-backlight-fix >/dev/null 2>&1; then
+		ryoku-hw-backlight-fix >/dev/null 2>&1 || true
+	fi
+}
+
+power_prepare() {
+	helper=/usr/bin/ryoku-power-cutover
+	[ -x "$helper" ] || return 0
+	"$helper" prepare-package
+}
+
+power_commit() {
+	helper=/usr/bin/ryoku-power-cutover
+	[ -x "$helper" ] || return 0
+	"$helper" package
+}
+
+case "$ACTION" in
+	pre)
+		if [ "${RYOKU_MANAGED_UPDATE:-0}" != 1 ] &&
+		   session_running && [ -x /usr/bin/ryoku-power-cutover ]; then
+			power_prepare
+		fi
+		;;
+	post)
+		refresh_caches
+		if [ -x /usr/bin/ryoku-polkit-reload ] &&
+		   ! /usr/bin/ryoku-polkit-reload; then
+			logger -t ryoku-polkit \
+				"ryoku-desktop post-transaction authorization-rule reload failed" \
+				>/dev/null 2>&1 || true
+		fi
+		if [ -x /usr/bin/ryoku-host ]; then
+			RYOKU_HOST_INIT=runit /usr/bin/ryoku-host svc reconcile --system >/dev/null 2>&1 || true
+		fi
+		tune_host
+		if [ "${RYOKU_MANAGED_UPDATE:-0}" != 1 ]; then
+			if [ -x /run/ryoku-power-cutover ] || session_running; then
+				power_commit
+			elif command -v loginctl >/dev/null 2>&1; then
+				loginctl reload >/dev/null 2>&1 || true
+			fi
+		fi
+		cat <<'EOF'
+==> Run `ryoku materialize` as your user to lay the Ryoku base configs into
+    ~/.config. The next Ryoku session provisions them through its runit bootstrap.
+EOF
+		;;
+esac

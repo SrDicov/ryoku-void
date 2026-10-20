@@ -1,0 +1,10 @@
+# Installed only when Phone is enabled in Ryoku Hub.
+kdeconnect
+scrcpy
+android-tools
+python-gobject
+python-dbus
+avahi
+python-pillow
+v4l2loopback-dkms
+linux-headers

@@ -3,21 +3,27 @@ name: SDDM Wayland greeter
 on:
   pull_request:
     paths:
-      - 'ryoku/lockscreen/sddm/setup'
+      - 'ryoku/lockscreen/sddm/**'
       - 'ryoku/cli/internal/doctor/doctor.go'
       - 'system/packages/base.packages'
+      - 'system/services/manifest.tsv'
       - 'release/packages/ryoku-desktop/PKGBUILD'
-      - 'tests/sddm-wayland.sh'
+      - 'release/packages/ryoku-desktop/payload.sh'
+      - 'void/init/system/ryoku-greeter-guard/**'
+      - 'tests/sddm-*.sh'
       - '.github/workflows/sddm-wayland.yml'
   push:
     branches:
       - main
     paths:
-      - 'ryoku/lockscreen/sddm/setup'
+      - 'ryoku/lockscreen/sddm/**'
       - 'ryoku/cli/internal/doctor/doctor.go'
       - 'system/packages/base.packages'
+      - 'system/services/manifest.tsv'
       - 'release/packages/ryoku-desktop/PKGBUILD'
-      - 'tests/sddm-wayland.sh'
+      - 'release/packages/ryoku-desktop/payload.sh'
+      - 'void/init/system/ryoku-greeter-guard/**'
+      - 'tests/sddm-*.sh'
       - '.github/workflows/sddm-wayland.yml'
   workflow_dispatch:
 
@@ -44,3 +50,12 @@ jobs:
       - name: Check the installer and packages
         shell: bash
         run: RYOKU_PATH="$PWD" tests/sddm-wayland.sh
+      - name: Check the greeter compositor's card choice
+        shell: bash
+        run: RYOKU_PATH="$PWD" tests/sddm-greeter-card.sh
+      - name: Check the greeter compositor survives weston dying
+        shell: bash
+        run: RYOKU_PATH="$PWD" tests/sddm-greeter-supervise.sh
+      - name: Check the login screen guard
+        shell: bash
+        run: RYOKU_PATH="$PWD" tests/sddm-greeter-guard.sh

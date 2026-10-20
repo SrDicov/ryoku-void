@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# ryoku-checked-pointer: publish the testing gate state while retaining the most
+# recent commit that passed. The pointer is shared by every packaged edition.
+#
+# usage: ryoku-checked-pointer <rclone-remote> <checking|passed|failed> <sha> --run <url> [--checks <comma-list>]
+# needs: rclone (configured, see bin/ryoku-r2-config), jq
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: ryoku-checked-pointer <rclone-remote> <checking|passed|failed> <sha> \
+       --run <url> [--checks <comma-list>]
+
+Write channels/testing/checked.json, carrying the most recent passed commit
+through checking and failed states.
+
+flags:
+  --run <url>           GitHub Actions run URL
+  --checks <comma-list> required check-run names (default: empty)
+  --help                show this help
+EOF
+}
+
+die() { printf 'ryoku-checked-pointer: %s\n' "$*" >&2; exit 1; }
+usage_error() {
+  printf 'ryoku-checked-pointer: %s\n' "$1" >&2
+  usage >&2
+  exit 2
+}
+need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
+
+if (($#)) && [[ $1 == -h || $1 == --help ]]; then
+  usage
+  exit 0
+fi
+(($# >= 3)) || usage_error "missing required arguments"
+remote=${1%/}
+state=$2
+sha=$3
+shift 3
+run_url=
+checks=
+while (($#)); do
+  case "$1" in
+    --run)
+      (($# >= 2)) || usage_error "--run needs a value"
+      run_url=$2
+      shift 2
+      ;;
+    --checks)
+      (($# >= 2)) || usage_error "--checks needs a value"
+      checks=$2
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *) usage_error "unknown argument: $1" ;;
+  esac
+done
+
+case "$state" in
+  checking|passed|failed) ;;
+  *) usage_error "state must be checking, passed, or failed" ;;
+esac
+[[ -n $remote ]] || usage_error "remote must not be empty"
+[[ -n $sha ]] || usage_error "SHA must not be empty"
+[[ -n $run_url ]] || usage_error "--run is required"
+need jq
+need rclone
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+old="$tmp/old.json"
+out="$tmp/checked.json"
+destination="$remote/channels/testing/checked.json"
+if ! rclone cat "$destination" > "$old" 2>/dev/null; then
+  : > "$old"
+fi
+
+passed='{}'
+if [[ -s $old ]]; then
+  passed=$(jq -c '.passed | select(type == "object")' "$old" 2>/dev/null || true)
+  [[ -n $passed ]] || passed='{}'
+fi
+now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+if [[ $state == passed ]]; then
+  passed=$(jq -cn --arg commit "$sha" --arg run "$run_url" --arg at "$now" \
+    '{commit: $commit, run: $run, at: $at}')
+fi
+
+jq -n \
+  --arg commit "$sha" \
+  --arg state "$state" \
+  --arg run "$run_url" \
+  --arg at "$now" \
+  --arg checks "$checks" \
+  --argjson passed "$passed" \
+  '{commit: $commit, state: $state, run: $run, at: $at,
+    checks: (if $checks == "" then [] else ($checks | split(",")) end),
+    passed: $passed}' > "$out"
+
+rclone copyto "$out" "$destination" \
+  --header-upload 'Cache-Control: no-cache, must-revalidate'
+cat "$out"

@@ -158,6 +158,15 @@ LIVE_LOCK_DIR="$TARGET_HOME/.local/share/quickshell-lockscreen"
 STAGE_ROOT="$TARGET_HOME/.local/share/ryoku/qylock-next"
 STAGE_TMP="$STAGE_ROOT.staging.$$"
 
+# A locked screen or a Ryoku cutover guard holds these on purpose; say which
+# lock is busy and who to look at instead of hanging silently, then wait.
+wait_flock() {
+  local fd=$1 path=$2
+  flock -n "$fd" && return 0
+  echo "install-qylock: waiting for $path; a lock screen or a Ryoku qylock guard holds it (fuser -v $path)" >&2
+  flock "$fd"
+}
+
 acquire_mutation_guard() {
   [[ ${RYOKU_QYLOCK_MUTATION_GUARDED:-0} != 1 ]] || return 0
   (( RYOKU_DRYRUN == 0 )) || return 0
@@ -167,24 +176,35 @@ acquire_mutation_guard() {
   }
   local runtime_dir="${RYOKU_QYLOCK_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
   exec 6>"$runtime_dir/ryoku-qylock-mutation.lock"
-  flock 6
+  wait_flock 6 "$runtime_dir/ryoku-qylock-mutation.lock"
 }
 
 external_generation_guard_ready() {
   local runtime_dir="${RYOKU_QYLOCK_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
-  [[ -r $runtime_dir/ryoku-qylock-generation-guard.ready ]] &&
+  [[ -r $runtime_dir/ryoku-qylock-generation-guard.ready ]] || return 1
+  if command -v systemctl >/dev/null 2>&1; then
     systemctl --user is-active --quiet ryoku-qylock-generation-guard.service
+  else
+    ryoku-power-cutover generation-guard-ready
+  fi
 }
 
 activation_contract_present() {
   [[ -x /usr/bin/ryoku-qylock-activate ||
      -x $TARGET_HOME/.local/bin/ryoku-qylock-activate ]] || return 1
   local unit
-  for unit in "$TARGET_HOME/.config/systemd/user/ryoku-shell.service" \
-    /usr/lib/systemd/user/ryoku-shell.service; do
-    [[ -f $unit ]] || continue
-    grep -Eq '^ExecStartPre=.*ryoku-qylock-activate([[:space:]]|$)' "$unit" && return 0
-  done
+  if [ -d /run/systemd/system ]; then
+    for unit in "$TARGET_HOME/.config/systemd/user/ryoku-shell.service" \
+      /usr/lib/systemd/user/ryoku-shell.service; do
+      [[ -f $unit ]] || continue
+      grep -Eq '^ExecStartPre=.*ryoku-qylock-activate([[:space:]]|$)' "$unit" && return 0
+    done
+  else
+    unit="$TARGET_HOME/.config/service/ryoku-shell/run"
+    [[ -f $unit ]] &&
+      grep -Eq '(^|[[:space:]"/])ryoku-qylock-activate([[:space:]"]|$)' "$unit" &&
+      return 0
+  fi
   return 1
 }
 
@@ -232,9 +252,9 @@ acquire_generation_guard() {
   }
   runtime_dir="${RYOKU_QYLOCK_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
   exec 8>"$runtime_dir/ryoku-qylock-launch.lock"
-  flock 8
+  wait_flock 8 "$runtime_dir/ryoku-qylock-launch.lock"
   exec 7>"$runtime_dir/ryoku-qylock-generation.lock"
-  flock 7
+  wait_flock 7 "$runtime_dir/ryoku-qylock-generation.lock"
   generation_guard_owned=1
   trap release_generation_guard EXIT
 }
@@ -350,6 +370,21 @@ install_greeter() {
 [Theme]
 Current=ryoku
 EOF
+
+  if [ ! -d /run/systemd/system ]; then
+    echo "  enabling sddm"
+    priv install -d -m755 /etc/runit/runsvdir/default
+    local dm
+    for dm in gdm lightdm lxdm greetd xdm; do
+      if [[ -L /etc/runit/runsvdir/default/$dm ]]; then
+        priv rm -f "/etc/runit/runsvdir/default/$dm"
+        if [[ -e /run/runit/runsvdir/current ]]; then
+          priv sv down "/etc/sv/$dm" || true
+        fi
+      fi
+    done
+    priv ln -sfn /etc/sv/sddm /etc/runit/runsvdir/default/sddm
+  fi
 }
 
 if [[ ${RYOKU_QYLOCK_USER_ONLY:-0} != 1 ]]; then

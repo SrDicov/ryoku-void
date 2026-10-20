@@ -1,0 +1,89 @@
+name: Refresh pinned upstream packages
+
+on:
+  schedule:
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: refresh-pinned-upstreams
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Refresh Fedora and Void pins
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: bot/refresh-pins
+    steps:
+      - name: Checkout unstable-dev
+        uses: actions/checkout@v4
+        with:
+          ref: unstable-dev
+          fetch-depth: 0
+
+      - name: Refresh package pins
+        id: refresh
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin/ryoku-refresh-pins --write --report "$RUNNER_TEMP/refresh-pins.md"
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check Fedora packages
+        if: steps.refresh.outputs.changed == 'true'
+        run: bash tests/fedora-packages.sh
+
+      - name: Check Void packages
+        if: steps.refresh.outputs.changed == 'true'
+        run: bash tests/void-packages.sh
+
+      - name: Push fixed refresh branch
+        if: steps.refresh.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git fetch origin "$BRANCH:refs/remotes/origin/$BRANCH" || true
+          git checkout -B "$BRANCH"
+          git add -u
+          git commit -m "[release] packages: refresh upstream pins"
+          git push --force-with-lease origin "HEAD:$BRANCH"
+
+      - name: Open or update refresh pull request
+        if: steps.refresh.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          body="$RUNNER_TEMP/refresh-pins.md"
+          compare="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/unstable-dev...$BRANCH?expand=1"
+          {
+            echo "Refreshed pins are on \`$BRANCH\`: [open the pull request]($compare)"
+            echo
+            cat "$body"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # The repository does not let Actions open pull requests by default;
+          # the pushed branch and the summary link are the fallback.
+          number="$(gh pr list --base unstable-dev --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [[ -n $number ]]; then
+            gh pr edit "$number" \
+              --title "[release] Refresh pinned upstream packages" \
+              --body-file "$body"
+          elif ! gh pr create \
+            --base unstable-dev \
+            --head "$BRANCH" \
+            --title "[release] Refresh pinned upstream packages" \
+            --body-file "$body"; then
+            echo "::warning::Could not open the pull request; open it from $compare"
+          fi

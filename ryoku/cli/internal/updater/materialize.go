@@ -24,14 +24,59 @@ const wpDropInDir = "wireplumber/wireplumber.conf.d"
 
 var ryokuDropIn = regexp.MustCompile(`^[0-9]+-ryoku-[^/]*\.conf$`)
 
+type iniProjection struct {
+	section string
+	key     string
+}
+
+var iconThemeProjections = map[string]iniProjection{
+	"gtk-3.0/settings.ini": {"Settings", "gtk-icon-theme-name"},
+	"gtk-4.0/settings.ini": {"Settings", "gtk-icon-theme-name"},
+	"qt6ct/qt6ct.conf":     {"Appearance", "icon_theme"},
+}
+
+// stripINIProjection removes the one line Ryoku derives from icon-theme state.
+// Comparing the remaining bytes keeps that projection from looking like a
+// whole-file user fork while preserving every unrelated edit.
+func stripINIProjection(body []byte, projection iniProjection) []byte {
+	lines := bytes.SplitAfter(body, []byte{'\n'})
+	out := make([]byte, 0, len(body))
+	section := ""
+	removed := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(string(line))
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			section = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]"))
+		}
+		if !removed && section == projection.section &&
+			!strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, ";") {
+			if key, _, ok := strings.Cut(trimmed, "="); ok && strings.TrimSpace(key) == projection.key {
+				removed = true
+				continue
+			}
+		}
+		out = append(out, line...)
+	}
+	return out
+}
+
+// A picked icon theme is durable state under ~/.config/ryoku, while its GTK
+// and Qt projections are managed files refreshed during materialize. Reapply
+// after the base and user overlay land, then hash projected files without the
+// derived key so a later Hub choice never looks like a hand-edited fork.
+var reapplyIconTheme = func(configHome string) error {
+	if !sys.Exists(filepath.Join(configHome, "ryoku", "icon-theme")) {
+		return nil
+	}
+	return exec.Command("ryoku-hub", "desktop", "icon-theme", "apply").Run()
+}
+
 // generatedSeed: base files seeded once on a fresh install, then never
 // clobbered or pruned by an update. The machine owns them after first boot.
 // Two kinds qualify: per-machine files the runtime regenerates (monitors.lua,
-// gpu.lua; kitty/current-theme.conf, which matugen rewrites from the wallpaper)
-// and user-owned config the package only seeds a starting point for
-// (keyboard.lua; hypr/user.lua, seeded with a header so a hand-edit sticks;
-// fastfetch/config.jsonc, which has no include mechanism, so direct edits
-// are the only way to customize the readout).
+// gpu.lua; Matugen's app palette siblings) and user-owned config the package
+// only seeds a starting point for (keyboard.lua; hypr/user.lua;
+// fastfetch/config.jsonc; the Starship layout selected in the Hub).
 // Slash-separated paths, relative to the config base. Most are also in
 // sys.LiveOwnedConfig so the overlay never re-lays a frozen copy over a file
 // edited in place; ghostty/config is the exception -- it is a seed the user may
@@ -40,10 +85,13 @@ var generatedSeed = generatedSeedSet()
 
 func generatedSeedSet() map[string]bool {
 	seed := map[string]bool{
-		"fastfetch/config.jsonc":   true,
-		"kitty/current-theme.conf": true,
-		"ghostty/config":           true,
-		"ghostty/ryoku-colors":     true,
+		"fastfetch/config.jsonc":      true,
+		"fastfetch/ryoku-colors.json": true,
+		"starship.toml":               true,
+		"starship/ryoku-colors.toml":  true,
+		"kitty/current-theme.conf":    true,
+		"ghostty/config":              true,
+		"ghostty/ryoku-colors":        true,
 	}
 	// Every provider's per-machine files are seeded and kept regardless of which
 	// compositor is running, so an update under one never prunes another's. The
@@ -62,6 +110,26 @@ func generatedSeedSet() map[string]bool {
 // isSeed folds the per-path seeds and the whole nvim tree into one test.
 func isSeed(rel string) bool {
 	return generatedSeed[rel] || strings.HasPrefix(rel, "nvim/")
+}
+
+// generatedRels are the config files a provider's apply authors, across every
+// provider, so the lay never writes them: the file's own provider owns its
+// bytes. wayfire's generated path is a shipped file too (its baseline is
+// compose's first layer, read from the packaged base directly), which is what
+// makes this set necessary rather than theoretical.
+var generatedRels = generatedRelSet()
+
+func generatedRelSet() map[string]bool {
+	out := map[string]bool{}
+	for _, name := range wm.Providers() {
+		dir := wm.ConfigDir(name)
+		for _, rel := range wm.GeneratedConfig(name) {
+			if d, _, ok := strings.Cut(rel, "/"); ok && d == dir {
+				out[rel] = true
+			}
+		}
+	}
+	return out
 }
 
 // providerConfigDirs is the set of ~/.config subdirs the window-manager
@@ -96,40 +164,67 @@ var applyProvider = func(name, store string) error {
 	return err
 }
 
-// applyGenerated completes every laid-down compositor tree: the packages ship
-// only the static seeds, while the compositor hard-includes the files its
-// provider generates (niri's settings.kdl and rebinds.kdl, Hyprland's
-// settings.lua and rebinds.lua). A tree without them is a compositor that
-// refuses its own config at the next login, which is exactly what a
-// hyprland-to-niri switch produced: nothing between the switch and that login
-// ran the TARGET's apply, because every apply call elsewhere follows the
-// active provider. Materialize is the one call the login bootstrap, the
-// switch, and the update all share, so it renders each laid-down tree's
-// generated half here. The user_edits mirrors of those files are forks, not
-// generated state, so their absence means nothing. Best-effort per provider:
-// a tree whose provider binary is absent stays as it was, never a failed
-// materialize.
+// providerInstalled reports whether a laid-down tree still has its provider
+// binary. Switched-away trees stay in place after their variant is removed, but
+// without the binary there is nothing to render. A var so tests stub the lookup.
+var providerInstalled = func(name string) bool {
+	return wm.OpenNamed(name).Available()
+}
+
+// applyGenerated completes every laid-down provider tree. Packages ship the
+// static half, while each provider owns files rendered from the neutral store.
+// A missing generated file can make the target reject its config at login, and
+// a whole-file render composed from an older shipped baseline can keep an
+// otherwise complete tree on obsolete defaults. Materialize is shared by login
+// bootstrap, switching and updates, so it repairs both states here.
+//
+// Render marks are provider-declared through the seam. They also distinguish a
+// managed user_edits mirror from a whole-file fork: a fork is never replaced
+// merely because the shipped baseline changed. Provider failures remain best
+// effort, so an unavailable binary leaves its tree untouched instead of failing
+// the complete materialize.
+//
+// A missing neutral store is not a reason to skip the first render. The
+// installer only seeds desktop.json for a non-default keyboard, and providers
+// render defaults from an unreadable store path. An unmarked user_edits copy
+// still has an owner, so without a store it is left alone rather than replaced
+// with provider defaults.
 func applyGenerated(configHome string) {
 	store := filepath.Join(configHome, "ryoku", "desktop.json")
-	if !sys.Exists(store) {
-		return // no neutral store to render from: the seeds are the right config
-	}
+	hasStore := sys.Exists(store)
+	base := sys.BaseConfigDir()
 	for _, name := range wm.Providers() {
 		dir := wm.ConfigDir(name)
 		if dir == "" || !sys.Exists(filepath.Join(configHome, dir)) {
 			continue // tree not laid down: nothing to complete
 		}
+		if !providerInstalled(name) {
+			continue // switched-away tree has no renderer
+		}
 		missing := false
+		authored := false
 		for _, rel := range wm.GeneratedConfig(name) {
 			if d, _, ok := strings.Cut(rel, "/"); !ok || d != dir {
-				continue // a user_edits fork mirror, not generated state
+				// A provider render in user_edits is its managed mirror. Anything
+				// else is a fork whose bytes materialize must not replace.
+				path := filepath.Join(configHome, rel)
+				if sys.Exists(path) {
+					body, err := os.ReadFile(path)
+					if err != nil || !wm.GeneratedConfigIsRender(name, body) {
+						authored = true
+					}
+				}
+				continue
 			}
 			if !sys.Exists(filepath.Join(configHome, rel)) {
 				missing = true
-				break
 			}
 		}
-		if !missing {
+		stale := wm.GeneratedConfigStale(name, base, configHome)
+		if !missing && !stale {
+			continue
+		}
+		if authored && (!hasStore || stale) {
 			continue
 		}
 		if err := applyProvider(name, store); err != nil {
@@ -188,6 +283,7 @@ func Materialize() error {
 	// nor what this one ships was edited by hand; it becomes a fork under the
 	// overlay instead of being thrown away.
 	laidHashes := readManifestHashes(state)
+	iconThemeState := sys.Exists(filepath.Join(dest, "ryoku", "icon-theme"))
 	overlaid := map[string]bool{}
 	if rels, err := sys.UserEditFiles(); err == nil {
 		for _, rel := range rels {
@@ -212,6 +308,15 @@ func Materialize() error {
 			}
 			continue
 		}
+		if generatedRels[rel] {
+			// The provider's own output, not shipped content: applyGenerated
+			// below reads this path as "the tree still needs its render", and
+			// laying the shipped bytes would forge that signal. The first
+			// login would then read the raw baseline -- no store rows, no
+			// seeds, no keybinds -- and every later materialize would clobber
+			// a composed file back to it.
+			continue
+		}
 		shipped, err := os.ReadFile(filepath.Join(base, rel))
 		if err != nil {
 			return fmt.Errorf(i18n.T("read %s: %w"), rel, err)
@@ -220,7 +325,16 @@ func Materialize() error {
 		if forkable(rel) && !overlaid[rel] {
 			if laid, ok := laidHashes[rel]; ok {
 				if live, err := os.ReadFile(dst); err == nil {
-					if h := hashBytes(live); h != laid && h != hashes[rel] {
+					h := hashBytes(live)
+					untouched := h == laid || h == hashes[rel]
+					if !untouched && iconThemeState {
+						if projection, ok := iconThemeProjections[rel]; ok {
+							strippedLive := hashBytes(stripINIProjection(live, projection))
+							strippedShipped := hashBytes(stripINIProjection(shipped, projection))
+							untouched = strippedLive == laid || strippedLive == strippedShipped
+						}
+					}
+					if !untouched {
 						if err := sys.CopyFile(dst, filepath.Join(sys.UserEditsDir(), rel)); err != nil {
 							return fmt.Errorf(i18n.T("keep your edit of %s: %w"), rel, err)
 						}
@@ -233,6 +347,19 @@ func Materialize() error {
 			return fmt.Errorf(i18n.T("copy %s: %w"), rel, err)
 		}
 		managed = append(managed, rel)
+	}
+
+	// A provider's live tree can be all generated state: wayfire ships no
+	// static file under wayfire/ at all, its baseline being read from this base
+	// at compose time. Laying files alone would leave ~/.config/wayfire absent
+	// and applyGenerated would read "no tree laid down" and skip the render,
+	// so the tree directory itself is part of the lay.
+	for _, name := range wm.Providers() {
+		if dir := wm.ConfigDir(name); dir != "" && sys.Exists(filepath.Join(base, dir)) {
+			if err := os.MkdirAll(filepath.Join(dest, dir), 0o755); err != nil {
+				return fmt.Errorf(i18n.T("lay the %s config dir: %w"), name, err)
+			}
+		}
 	}
 
 	// Prune files this release no longer ships (in the previous manifest,
@@ -278,8 +405,8 @@ func Materialize() error {
 	// retiredKeep: a path Ryoku used to lay into ~/.config and deliberately
 	// stopped shipping. The manifest prune would delete the user's copy, which
 	// for mimeapps.list means throwing away every default app they picked, the
-	// exact damage that moving Ryoku's map to the vendor layer
-	// (/usr/share/applications/mimeapps.list) exists to stop. `ryoku doctor`
+	// exact damage that moving Ryoku's map to the site layer
+	// (/usr/local/share/applications/mimeapps.list) exists to stop. `ryoku doctor`
 	// strips the stale Ryoku lines out of it instead.
 	retiredKeep := map[string]bool{"mimeapps.list": true}
 
@@ -309,8 +436,12 @@ func Materialize() error {
 	if err := overlayUserEdits(dest); err != nil {
 		return err
 	}
+	_ = reapplyIconTheme(dest)
 	for _, rel := range managed {
 		if live, err := os.ReadFile(filepath.Join(dest, rel)); err == nil {
+			if projection, ok := iconThemeProjections[rel]; ok && iconThemeState {
+				live = stripINIProjection(live, projection)
+			}
 			hashes[rel] = hashBytes(live)
 		}
 	}
@@ -319,7 +450,7 @@ func Materialize() error {
 	}
 	wirePlumberAfter, _ := os.ReadFile(filepath.Join(dest, wirePlumberPolicyRel))
 	if wpConfigPruned || !bytes.Equal(wirePlumberBefore, wirePlumberAfter) {
-		_ = exec.Command("systemctl", "--user", "try-restart", "wireplumber.service").Run()
+		_ = service("--user", "try-restart", "wireplumber.service")
 	}
 	fmt.Printf(i18n.T("materialized %d files -> %s\n"), len(managed), dest)
 	if len(kept) > 0 {

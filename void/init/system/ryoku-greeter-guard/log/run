@@ -1,0 +1,2 @@
+#!/bin/sh
+exec vlogger -t ryoku-greeter-guard -p daemon

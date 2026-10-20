@@ -1,0 +1,21 @@
+#!/bin/sh
+exec 2>&1
+
+. "${RYOKU_INIT_LIB:-/usr/lib/ryoku/runit}/wait-for"
+load_session_env
+BIN=${RYOKU_BIN_DIR:-/usr/bin}
+_home=${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}
+
+if [ -d "$_home/.config/ryoku" ] && [ -f "$_home/.config/quickshell/shell/shell.qml" ]; then
+	exec sv down .
+fi
+
+# Materialization is idempotent; a timeout keeps it from hanging login.
+_timeout=${RYOKU_BOOTSTRAP_TIMEOUT:-120}
+if command -v timeout >/dev/null 2>&1; then
+	timeout "$_timeout" "$BIN/ryoku" materialize
+else
+	"$BIN/ryoku" materialize
+fi
+
+exec sv down .

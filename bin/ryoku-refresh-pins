@@ -1,0 +1,523 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec python3 - "$0" "$@" <<'PY'
+import csv
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+
+EXIT_BUMPS = 3
+PRE_RELEASE = re.compile(r"(?:^|[._-])(alpha|beta|rc|pre|preview|dev)(?:[._-]|\d|$)", re.I)
+
+
+def fail(message):
+    print(f"ryoku-refresh-pins: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def split_field(value):
+    return [] if value in ("", "-") else value.split(";")
+
+
+def version_key(value):
+    return tuple((0, int(part)) if part.isdigit() else (1, part.lower())
+                 for part in re.findall(r"\d+|[A-Za-z]+", value))
+
+
+def canonical(tag):
+    tag = tag.strip()
+    if len(tag) > 1 and tag[0] in "vV" and tag[1].isdigit():
+        return tag[1:]
+    return tag
+
+
+def format_version(value, style):
+    if style in ("-", "keep"):
+        return None
+    if style == "plain":
+        return value
+    if style == "rpm-safe":
+        return value.replace("-", "_")
+    if style == "xbps-safe":
+        return value.replace("-", "")
+    if style == "broadcom":
+        return re.sub(r"_p\d+$", "", value)
+    if style == "dotted-date":
+        return value.replace("-", ".")
+    if style == "beta-rpm":
+        return value.replace("-", "_")
+    if style == "beta-void":
+        return value.replace("-beta.", "beta")
+    if style == "short":
+        return value[:8]
+    fail(f"unknown version format {style}")
+
+
+class Client:
+    def __init__(self):
+        self.cache = {}
+        self.token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+
+    def get(self, url, accept="application/vnd.github+json"):
+        if url in self.cache:
+            return self.cache[url]
+        headers = {"Accept": accept, "User-Agent": "ryoku-pin-refresh"}
+        if self.token and "api.github.com" in url:
+            headers["Authorization"] = f"Bearer {self.token}"
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=45) as response:
+                data = response.read()
+        except (OSError, urllib.error.HTTPError) as error:
+            fail(f"could not fetch {url}: {error}")
+        self.cache[url] = data
+        return data
+
+    def json(self, url):
+        try:
+            return json.loads(self.get(url))
+        except (ValueError, TypeError) as error:
+            fail(f"could not parse JSON from {url}: {error}")
+
+    def ls_remote(self, url, *refs):
+        command = ["git", "ls-remote"]
+        if not refs:
+            command.extend(["--tags", "--refs"])
+        command.append(url)
+        command.extend(refs)
+        try:
+            output = subprocess.check_output(
+                command, text=True, stderr=subprocess.STDOUT, timeout=60)
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            fail(f"could not read refs from {url}: {error}")
+        return [line.split(None, 1) for line in output.splitlines() if "\t" in line]
+
+    def github_tags(self, repo):
+        rows = self.ls_remote(f"https://github.com/{repo}.git")
+        return [(ref.split("refs/tags/", 1)[1], sha) for sha, ref in rows
+                if "refs/tags/" in ref]
+
+    def latest(self, row):
+        source = row["source"]
+        upstream = row["upstream"]
+        if source == "github-release":
+            url = f"https://github.com/{upstream}/releases/latest"
+            headers = {"User-Agent": "ryoku-pin-refresh"}
+            try:
+                request = urllib.request.Request(url, headers=headers, method="HEAD")
+                with urllib.request.urlopen(request, timeout=45) as response:
+                    final_url = response.geturl()
+            except urllib.error.HTTPError as error:
+                if error.code == 404:
+                    return row["current"], row["current"], f"https://github.com/{upstream}/releases"
+                fail(f"{row['package']}: could not resolve the latest GitHub release: {error}")
+            except OSError as error:
+                fail(f"{row['package']}: could not resolve the latest GitHub release: {error}")
+            marker = "/releases/tag/"
+            if marker not in final_url:
+                if final_url.rstrip("/") == f"https://github.com/{upstream}/releases":
+                    return row["current"], row["current"], final_url
+                fail(f"{row['package']}: latest GitHub release did not resolve to a tag")
+            tag = urllib.parse.unquote(final_url.split(marker, 1)[1].rstrip("/"))
+            if PRE_RELEASE.search(canonical(tag)):
+                fail(f"{row['package']}: latest GitHub release is a prerelease")
+            return canonical(tag), tag, final_url
+        if source == "github-tags":
+            candidates = [(tag, sha) for tag, sha in self.github_tags(upstream)
+                          if canonical(tag)[:1].isdigit() and not PRE_RELEASE.search(canonical(tag))]
+            if not candidates:
+                return row["current"], row["current"], f"https://github.com/{upstream}/tags"
+            tag, _ = max(candidates, key=lambda item: version_key(canonical(item[0])))
+            return canonical(tag), tag, f"https://github.com/{upstream}/releases/tag/{tag}"
+        if source == "git-tags":
+            rows = self.ls_remote(upstream)
+            tags = [ref.split("refs/tags/", 1)[1] for _, ref in rows if "refs/tags/" in ref]
+            tags = [tag for tag in tags if canonical(tag)[:1].isdigit() and not PRE_RELEASE.search(canonical(tag))]
+            if not tags:
+                return row["current"], row["current"], upstream.removesuffix(".git")
+            tag = max(tags, key=lambda item: version_key(canonical(item)))
+            return canonical(tag), tag, upstream.removesuffix(".git") + "/-/tags/" + tag
+        if source == "pypi":
+            data = self.json(f"https://pypi.org/pypi/{upstream}/json")
+            value = data.get("info", {}).get("version", "")
+            if not value or PRE_RELEASE.search(value):
+                fail(f"{row['package']}: PyPI did not return a stable version")
+            return value, value, f"https://pypi.org/project/{upstream}/{value}/"
+        if source == "github-commit":
+            rows = self.ls_remote(f"https://github.com/{upstream}.git", "HEAD")
+            if not rows:
+                fail(f"{row['package']}: GitHub did not return a default-branch commit")
+            commit = rows[0][0]
+            return commit, commit, f"https://github.com/{upstream}/commit/{commit}"
+        fail(f"{row['package']}: unknown source {source}")
+
+    def tag_commit(self, row, tag):
+        if row["source"] == "github-commit":
+            return tag
+        upstream = row["upstream"]
+        if row["source"].startswith("github-"):
+            upstream = f"https://github.com/{upstream}.git"
+        rows = self.ls_remote(upstream, f"refs/tags/{tag}^{{}}", f"refs/tags/{tag}")
+        if not rows:
+            fail(f"{row['package']}: tag {tag} has no commit")
+        peeled = next((sha for sha, ref in rows if ref.endswith("^{}")), "")
+        return peeled or rows[0][0]
+
+
+def load_manifest(path):
+    with path.open(newline="") as stream:
+        rows = list(csv.DictReader(stream, delimiter="\t"))
+    required = {"package", "source", "upstream", "current", "allow_major", "rpm_format",
+                "void_format", "extra_format", "pin_files", "ref_fields", "commit_fields",
+                "artifact_patterns"}
+    if not rows or set(rows[0]) != required:
+        fail(f"invalid manifest header in {path}")
+    names = set()
+    for row in rows:
+        if row["package"] in names:
+            fail(f"duplicate package {row['package']} in {path}")
+        names.add(row["package"])
+    return rows
+
+
+def field_value(text, path, field):
+    if path.endswith(".spec"):
+        match = re.search(rf"^%global\s+{re.escape(field)}\s+(\S+)", text, re.M)
+    else:
+        match = re.search(rf"^{re.escape(field)}=(?:\"([^\"]*)\"|(\S+))", text, re.M)
+    if not match:
+        fail(f"{path}: missing field {field}")
+    return next(value for value in match.groups() if value is not None) if match.lastindex else match.group(0).split()[-1]
+
+
+def package_version(text, path):
+    pattern = r"^Version:\s*(\S+)" if path.endswith(".spec") else r"^version=(\S+)"
+    match = re.search(pattern, text, re.M)
+    if not match:
+        fail(f"{path}: missing package version")
+    return match.group(1)
+
+
+def extra_entry(text, path, key):
+    match = re.search(rf'^\s*"{re.escape(key)}":\s*\("([^"]+)",\s*"([^"]+)",\s*"([0-9a-f]{{64}})",\s*"([^"]+)"\),$', text, re.M)
+    if not match:
+        fail(f"{path}: missing extras entry {key}")
+    return match.groups()
+
+
+def extra_patterns(row):
+    result = {}
+    for pattern in split_field(row["artifact_patterns"]):
+        if pattern.startswith("extra:"):
+            key, url = pattern[6:].split("=", 1)
+            result[key] = url
+    return result
+
+
+def has_drift(root, row):
+    rpm_expected = format_version(row["current"], row["rpm_format"])
+    void_expected = format_version(row["current"], row["void_format"])
+    for relative in split_field(row["pin_files"]):
+        path = root / relative
+        if not path.exists():
+            fail(f"{row['package']}: pin file does not exist: {relative}")
+        text = path.read_text()
+        if relative.endswith(".spec") and rpm_expected is not None and package_version(text, relative) != rpm_expected:
+            return True
+        if relative.endswith("/template") and void_expected is not None and package_version(text, relative) != void_expected:
+            return True
+    for descriptor in split_field(row["ref_fields"]):
+        relative, field = descriptor.split("#", 1)
+        if field_value((root / relative).read_text(), relative, field) != row["current"]:
+            return True
+    if row["source"] == "github-commit":
+        for descriptor in split_field(row["commit_fields"]):
+            relative, field = descriptor.split("#", 1)
+            if field_value((root / relative).read_text(), relative, field) != row["current"]:
+                return True
+    expected_extra = format_version(row["current"], row["extra_format"])
+    if expected_extra is not None:
+        for key in extra_patterns(row):
+            relative = next((item for item in split_field(row["pin_files"]) if item.endswith("ryoku-install-extra")), "")
+            if not relative:
+                fail(f"{row['package']}: extra artifact has no installer pin file")
+            if extra_entry((root / relative).read_text(), relative, key)[0] != expected_extra:
+                return True
+    return False
+
+
+def replace_package_version(text, path, value):
+    if path.endswith(".spec"):
+        if value is not None:
+            text, count = re.subn(r"^Version:\s*\S+", f"Version:        {value}", text, count=1, flags=re.M)
+            if count != 1:
+                fail(f"{path}: could not replace Version")
+        text, count = re.subn(r"^Release:\s*\S+", "Release:        1%{?dist}", text, count=1, flags=re.M)
+        if count != 1:
+            fail(f"{path}: could not reset Release")
+        return text
+    if value is not None:
+        text, count = re.subn(r"^version=\S+", f"version={value}", text, count=1, flags=re.M)
+        if count != 1:
+            fail(f"{path}: could not replace version")
+    text, count = re.subn(r"^revision=\S+", "revision=1", text, count=1, flags=re.M)
+    if count != 1:
+        fail(f"{path}: could not reset revision")
+    return text
+
+
+def replace_field(text, path, field, value):
+    if path.endswith(".spec"):
+        pattern = rf"^(%global\s+{re.escape(field)}\s+)\S+"
+    else:
+        pattern = rf"^({re.escape(field)}=)(?:\"[^\"]*\"|\S+)"
+    text, count = re.subn(pattern, rf"\g<1>{value}", text, count=1, flags=re.M)
+    if count != 1:
+        fail(f"{path}: could not replace field {field}")
+    return text
+
+
+def render(pattern, values):
+    for key, value in values.items():
+        pattern = pattern.replace("{" + key + "}", value)
+    return pattern
+
+
+def download_digest(client, url):
+    url = url.split(">", 1)[0]
+    data = client.get(url, accept="application/octet-stream")
+    return hashlib.sha256(data).hexdigest()
+
+
+def rpm_values(text):
+    values = {}
+    for key, value in re.findall(r"^%global\s+(\w+)\s+(\S+)", text, re.M):
+        values[key] = value
+    for key in ("Name", "Version", "URL"):
+        match = re.search(rf"^{key}:\s*(\S+)", text, re.M)
+        if match:
+            values[key.lower()] = match.group(1)
+    for _ in range(8):
+        changed = False
+        for key, value in list(values.items()):
+            expanded = re.sub(r"%\{(\w+)\}", lambda match: values.get(match.group(1), match.group(0)), value)
+            if expanded != value:
+                values[key] = expanded
+                changed = True
+        if not changed:
+            break
+    return values
+
+
+def expand_rpm(value, values):
+    for _ in range(8):
+        expanded = re.sub(r"%\{(\w+)\}", lambda match: values.get(match.group(1), match.group(0)), value)
+        if expanded == value:
+            return value
+        value = expanded
+    return value
+
+
+def refresh_rpm_sources(client, spec_text, manifest_text, manifest_path):
+    values = rpm_values(spec_text)
+    sources = re.findall(r"^Source\d*:\s*(\S+)", spec_text, re.M)
+    updates = []
+    for source in sources:
+        expanded = expand_rpm(source, values)
+        if not expanded.startswith(("https://", "http://")):
+            continue
+        if "#/" in expanded:
+            url, local = expanded.split("#/", 1)
+        elif "#" in expanded:
+            url, local = expanded.split("#", 1)
+        else:
+            url = expanded
+            local = urllib.parse.unquote(Path(urllib.parse.urlsplit(url).path).name)
+        updates.append((local, download_digest(client, url)))
+    entries = list(re.finditer(r"^SHA256 \(([^)]+)\) = [0-9a-f]{64}$", manifest_text, re.M))
+    if len(entries) != len(updates):
+        fail(f"{manifest_path}: expected {len(updates)} checksum entries, found {len(entries)}")
+    replacements = iter(updates)
+    return re.sub(
+        r"^SHA256 \([^)]+\) = [0-9a-f]{64}$",
+        lambda _: "SHA256 (%s) = %s" % next(replacements),
+        manifest_text,
+        flags=re.M)
+
+
+def shell_assignments(text):
+    values = {}
+    pattern = re.compile(r"^(\w+)=(?:\"([\s\S]*?)\"|([^\n]*))", re.M)
+    for match in pattern.finditer(text):
+        value = match.group(2) if match.group(2) is not None else match.group(3)
+        values[match.group(1)] = value
+    for _ in range(12):
+        changed = False
+        for key, value in list(values.items()):
+            expanded = re.sub(r"\$\{(\w+)\}", lambda item: values.get(item.group(1), item.group(0)), value)
+            if expanded != value:
+                values[key] = expanded
+                changed = True
+        if not changed:
+            break
+    return values
+
+
+def refresh_void_checksums(client, text, path):
+    values = shell_assignments(text)
+    if "distfiles" not in values:
+        fail(f"{path}: missing distfiles")
+    urls = values["distfiles"].split()
+    digests = [download_digest(client, url) for url in urls]
+    replacement = "checksum=" + (digests[0] if len(digests) == 1 else '"' + "\n".join(" " + item for item in digests) + '"')
+    pattern = r"^checksum=(?:\"[\s\S]*?\"|\S+)"
+    text, count = re.subn(pattern, replacement, text, count=1, flags=re.M)
+    if count != 1:
+        fail(f"{path}: could not replace checksum")
+    return text
+
+
+def update_extra(client, text, path, key, version, url):
+    old_version, _, _, destination = extra_entry(text, path, key)
+    digest = download_digest(client, url)
+    pattern = rf'^(\s*"{re.escape(key)}":\s*)\("[^"]+",\s*"[^"]+",\s*"[0-9a-f]{{64}}",\s*"[^"]+"\),$'
+    replacement = rf'\g<1>("{version}", "{url}", "{digest}", "{destination}"),'
+    text, count = re.subn(pattern, replacement, text, count=1, flags=re.M)
+    if count != 1:
+        fail(f"{path}: could not update extras entry {key} from {old_version}")
+    return text
+
+
+def major(value):
+    match = re.search(r"\d+", value)
+    return int(match.group(0)) if match else None
+
+
+def main():
+    if len(sys.argv) < 3 or sys.argv[2] not in ("--check", "--write"):
+        fail("usage: bin/ryoku-refresh-pins --check|--write [--package NAME] [--report PATH]")
+    mode = sys.argv[2]
+    selected = None
+    report_path = None
+    index = 3
+    while index < len(sys.argv):
+        if sys.argv[index] == "--package" and index + 1 < len(sys.argv):
+            selected = sys.argv[index + 1]
+            index += 2
+        elif sys.argv[index] == "--report" and index + 1 < len(sys.argv):
+            report_path = Path(sys.argv[index + 1])
+            index += 2
+        else:
+            fail(f"unknown argument {sys.argv[index]}")
+    root = Path(sys.argv[1]).resolve().parents[1]
+    manifest = root / "system/packages/upstream-pins.tsv"
+    rows = load_manifest(manifest)
+    if selected:
+        rows = [row for row in rows if row["package"] == selected]
+        if not rows:
+            fail(f"package {selected} is not in {manifest}")
+    client = Client()
+    pending = []
+    for row in rows:
+        latest, tag, link = client.latest(row)
+        drift = has_drift(root, row)
+        newer = row["source"] == "github-commit" and latest != row["current"]
+        if row["source"] != "github-commit":
+            newer = version_key(latest) > version_key(row["current"])
+        if not newer and not drift:
+            continue
+        blocked = (row["allow_major"] != "yes" and row["source"] != "github-commit"
+                   and major(latest) != major(row["current"]))
+        status = "major-opt-in-required" if blocked else ("pin-drift" if not newer else "update")
+        print(f"{status}\t{row['package']}\t{row['current']}\t{latest}\t{link}")
+        pending.append((row, latest, tag, link, blocked, drift))
+    if mode == "--check":
+        if not pending:
+            print("all-current")
+        raise SystemExit(EXIT_BUMPS if pending else 0)
+
+    changes = {manifest: manifest.read_text()}
+    completed = []
+    for row, latest, tag, link, blocked, drift in pending:
+        if blocked:
+            continue
+        commit = ""
+        if split_field(row["commit_fields"]):
+            commit = client.tag_commit(row, tag)
+        rpm_version = format_version(latest, row["rpm_format"])
+        void_version = format_version(latest, row["void_format"])
+        for relative in split_field(row["pin_files"]):
+            path = root / relative
+            text = changes.get(path, path.read_text())
+            if relative.endswith(".spec"):
+                text = replace_package_version(text, relative, rpm_version)
+            elif relative.endswith("/template"):
+                text = replace_package_version(text, relative, void_version)
+            changes[path] = text
+        for descriptor in split_field(row["ref_fields"]):
+            relative, field = descriptor.split("#", 1)
+            path = root / relative
+            changes[path] = replace_field(changes.get(path, path.read_text()), relative, field, latest)
+        for descriptor in split_field(row["commit_fields"]):
+            relative, field = descriptor.split("#", 1)
+            path = root / relative
+            changes[path] = replace_field(changes.get(path, path.read_text()), relative, field, commit)
+
+        values = {"version": latest, "tag": tag, "commit": commit or latest,
+                  "rpm_version": rpm_version or latest}
+        extras_file = next((item for item in split_field(row["pin_files"]) if item.endswith("ryoku-install-extra")), "")
+        extra_version = format_version(latest, row["extra_format"])
+        for key, pattern in extra_patterns(row).items():
+            if not extras_file or extra_version is None:
+                fail(f"{row['package']}: incomplete extras pin description")
+            path = root / extras_file
+            url = render(pattern, values)
+            changes[path] = update_extra(client, changes.get(path, path.read_text()), extras_file, key, extra_version, url)
+
+        for relative in split_field(row["pin_files"]):
+            if "/sources/" in relative:
+                path = root / relative
+                spec_path = path.parent.parent / f"{path.name}.spec"
+                spec_text = changes.get(spec_path, spec_path.read_text())
+                changes[path] = refresh_rpm_sources(client, spec_text, changes.get(path, path.read_text()), relative)
+            elif relative.endswith("/template") and re.search(r"^checksum=(?!SKIP)", changes[root / relative], re.M):
+                path = root / relative
+                changes[path] = refresh_void_checksums(client, changes[path], relative)
+
+        manifest_pattern = rf"^({re.escape(row['package'])}\t(?:[^\t]*\t){{2}}){re.escape(row['current'])}(\t)"
+        changes[manifest], count = re.subn(manifest_pattern, rf"\g<1>{latest}\g<2>", changes[manifest], count=1, flags=re.M)
+        if count != 1:
+            fail(f"could not update {row['package']} in {manifest}")
+        completed.append((row["package"], row["current"], latest, link, drift))
+
+    for path, text in changes.items():
+        if path.read_text() == text:
+            continue
+        path.write_text(text)
+    if report_path:
+        lines = ["## Pinned upstream package refresh", ""]
+        if completed:
+            for package, old, new, link, drift in completed:
+                detail = "pin drift repaired" if old == new and drift else f"{old} to {new}"
+                lines.append(f"- [{package}]({link}): {detail}")
+        else:
+            lines.append("No eligible package updates were found.")
+        blocked_rows = [item for item in pending if item[4]]
+        if blocked_rows:
+            lines.extend(["", "Major updates need an explicit manifest opt-in:"])
+            for row, latest, _, link, _, _ in blocked_rows:
+                lines.append(f"- [{row['package']}]({link}): {row['current']} to {latest}")
+        lines.extend(["", "Package builds run after this pull request lands on `unstable-dev`.", ""])
+        report_path.write_text("\n".join(lines))
+    print(f"wrote\t{len(completed)}\tpackage pin set(s)")
+
+
+main()
+PY

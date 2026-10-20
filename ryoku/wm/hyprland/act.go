@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	wm "ryoku-wm"
 )
@@ -65,6 +66,9 @@ func runAct(args []string) error {
 			return err
 		}
 		return dispatch(`hl.dsp.window.float({ action = "toggle", window = ` + luaStr("address:"+id) + ` })`)
+
+	case wm.ActionWindowPlace:
+		return placeWindow(rest)
 
 	case wm.ActionWindowMoveToWorkspace:
 		id, err := arg(rest, 0, "window id")
@@ -132,6 +136,19 @@ func runAct(args []string) error {
 			return err
 		}
 		return dispatch(`hl.dsp.workspace.toggle_special(` + luaStr(name) + `)`)
+
+	case wm.ActionWindowHide:
+		id, err := arg(rest, 0, "window id or focused")
+		if err != nil {
+			return err
+		}
+		if id == "focused" {
+			// The workspace helper owns the focused case: a silent move still
+			// pulls focus into the scratchpad, so it closes the special
+			// workspace again and refocuses where the window came from.
+			return runWorkspaceHelper("hide")
+		}
+		return dispatch(`hl.dsp.window.move({ workspace = "special:` + scratchName + `", window = ` + luaStr("address:"+id) + `, follow = false })`)
 
 	case wm.ActionSessionExit:
 		return dispatch(`hl.dsp.exit()`)
@@ -417,18 +434,23 @@ func touchpad(args []string) error {
 	case "off", "disable":
 		return touchpadSet(false)
 	case "toggle":
+		if wm.TouchpadToggleIsEcho(time.Now()) {
+			return nil
+		}
 		// A stored off means re-enable; otherwise lock it.
 		return touchpadSet(touchpadOff())
 	case "restore":
 		// Login and reload re-enable every pad (the state is a runtime override,
-		// not config), so a stored off is pushed back. Silent: an unattended
-		// restore must not toast, and no stored off has nothing to say.
+		// not config), so a stored off is pushed back. A reload stays silent; at
+		// login the lock is named once, so a pad left off is never a mystery.
 		if !touchpadOff() {
 			return nil
 		}
 		// Best-effort like the ported script: a transient device-list failure at
 		// login must not turn an unattended re-assert into an error.
-		_, _ = setPads(false)
+		if found, _ := setPads(false); found && len(args) > 1 && args[1] == "login" {
+			touchpadNotify("Touchpad is locked off", "Press the touchpad key (Fn+F10 on most laptops) to turn it back on")
+		}
 		return nil
 	}
 	return fmt.Errorf("act input.touchpad: mode must be on|off|toggle|status|restore, got %q", mode)
@@ -560,20 +582,111 @@ func shaderPath(name string) string {
 	return filepath.Join(home, ".config", "hypr", "shaders", name+".glsl")
 }
 
-// followMouseMode reads the live mode, empty when it cannot be read. getoption
-// is a top-level query and works under the Lua parser.
+// followMouseMode reports the mode the user configured, which is what the
+// launcher hands back when it closes. It reads the settings store rather than
+// the live option: a prior freeze that never restored (a crash mid-launch)
+// leaves follow_mouse at 0 live, and reading that back would "restore" the
+// stuck value instead of the user's setting. The store is the durable truth
+// and its default matches the shipped input.lua.
 func followMouseMode() string {
-	out, err := ctl("getoption", "input:follow_mouse", "-j")
+	return strconv.Itoa(loadStore(desktopStorePath()).Input.FollowMouse)
+}
+
+// placeWindow applies the neutral output-local rectangle without ever falling
+// back to the focused window. Hyprland's move coordinates are global logical
+// coordinates, so the target output's logical origin is the only conversion.
+// Client geometry and monitor origins share that coordinate space; applying the
+// output scale again would double-scale a fractional output.
+func placeWindow(args []string) error {
+	id, x, y, width, height, output, err := windowPlacementArgs(args)
 	if err != nil {
-		return ""
+		return err
 	}
-	var o struct {
-		Int int `json:"int"`
+
+	monitors, err := readMonitors()
+	if err != nil {
+		return fmt.Errorf("act %s: read outputs: %w", wm.ActionWindowPlace, err)
 	}
-	if json.Unmarshal(out, &o) != nil {
-		return ""
+	var target *hyprMonitor
+	for i := range monitors {
+		if monitors[i].Name == output {
+			target = &monitors[i]
+			break
+		}
 	}
-	return strconv.Itoa(o.Int)
+	if target == nil {
+		return fmt.Errorf("act %s: output %q does not exist", wm.ActionWindowPlace, output)
+	}
+	if target.Scale <= 0 {
+		return fmt.Errorf("act %s: output %q reported invalid scale %g", wm.ActionWindowPlace, output, target.Scale)
+	}
+
+	raw, err := ctl("clients", "-j")
+	if err != nil {
+		return fmt.Errorf("act %s: read windows: %w", wm.ActionWindowPlace, err)
+	}
+	var clients []struct {
+		Address  string `json:"address"`
+		Floating bool   `json:"floating"`
+	}
+	if err := json.Unmarshal(raw, &clients); err != nil {
+		return fmt.Errorf("act %s: decode windows: %w", wm.ActionWindowPlace, err)
+	}
+	floating, found := false, false
+	for _, client := range clients {
+		if client.Address == id {
+			floating, found = client.Floating, true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("act %s: window id %q does not exist", wm.ActionWindowPlace, id)
+	}
+
+	sel := luaStr("address:" + id)
+	if !floating {
+		if err := dispatch(`hl.dsp.window.float({ action = "toggle", window = ` + sel + ` })`); err != nil {
+			return fmt.Errorf("act %s: make window %q floating: %w", wm.ActionWindowPlace, id, err)
+		}
+	}
+	if err := dispatch(`hl.dsp.window.move({ monitor = ` + luaStr(output) + `, window = ` + sel + ` })`); err != nil {
+		return fmt.Errorf("act %s: move window %q to output %q: %w", wm.ActionWindowPlace, id, output, err)
+	}
+	if err := dispatch(`hl.dsp.window.resize({ x = ` + strconv.Itoa(width) + `, y = ` + strconv.Itoa(height) + `, exact = true, window = ` + sel + ` })`); err != nil {
+		return fmt.Errorf("act %s: resize window %q: %w", wm.ActionWindowPlace, id, err)
+	}
+	globalX, globalY := target.X+x, target.Y+y
+	if err := dispatch(`hl.dsp.window.move({ x = ` + strconv.Itoa(globalX) + `, y = ` + strconv.Itoa(globalY) + `, window = ` + sel + ` })`); err != nil {
+		return fmt.Errorf("act %s: position window %q: %w", wm.ActionWindowPlace, id, err)
+	}
+	return nil
+}
+
+func windowPlacementArgs(args []string) (id string, x, y, width, height int, output string, err error) {
+	id, err = arg(args, 0, "window id")
+	if err != nil {
+		return
+	}
+	names := []string{"x", "y", "width", "height"}
+	values := []*int{&x, &y, &width, &height}
+	for i := range names {
+		raw, argErr := arg(args, i+1, names[i])
+		if argErr != nil {
+			err = argErr
+			return
+		}
+		*values[i], err = strconv.Atoi(raw)
+		if err != nil {
+			err = fmt.Errorf("act %s: %s must be an integer, got %q", wm.ActionWindowPlace, names[i], raw)
+			return
+		}
+	}
+	if width <= 0 || height <= 0 {
+		err = fmt.Errorf("act %s: width and height must be positive, got %dx%d", wm.ActionWindowPlace, width, height)
+		return
+	}
+	output, err = arg(args, 5, "output name")
+	return
 }
 
 // arg names the missing value, so a bad keybind reports it instead of an index.
@@ -644,4 +757,14 @@ func nightlightStop(name string) {
 			_ = syscall.Kill(pid, syscall.SIGTERM)
 		}
 	}
+}
+
+// scratchName is the special workspace the shipped scratchpad binds use; the
+// workspace helper names it the same way.
+const scratchName = "scratch"
+
+// runWorkspaceHelper runs the shipped workspace helper the scratchpad binds
+// call, so window.hide on the focused window behaves exactly like Super+H.
+var runWorkspaceHelper = func(args ...string) error {
+	return exec.Command(filepath.Join(hyprConfigDir(), "scripts", "ryoku-workspace"), args...).Run()
 }

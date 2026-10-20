@@ -1,0 +1,71 @@
+timeout: 15
+default_entry: 1
+
+interface_branding: Ryoku Bootloader
+interface_branding_color: C75D2B
+interface_help_color: C75D2B
+hash_mismatch_panic: no
+
+term_background: 060607
+backdrop: 060607
+term_palette: 060607;EAE2D5;C75D2B;3A3630;88A57D;C75D2B;8C857A;EAE2D5
+term_palette_bright: 141210;EAE2D5;C75D2B;3A3630;88A57D;C75D2B;8C857A;EAE2D5
+term_foreground: EAE2D5
+term_foreground_bright: EAE2D5
+term_background_bright: 141210
+
+/@RYOKU_ISO_TITLE@
+    protocol: linux
+    path: boot():/boot/vmlinuz
+    module_path: boot():/boot/initrd
+    cmdline: root=live:CDLABEL=VOID_LIVE ro init=/sbin/init rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 gpt add_efi_memmap vconsole.unicode=1 vconsole.keymap=us locale.LANG=en_US.UTF-8 console=tty1 console=ttyS0,115200n8 rd.overlayfs=1
+
+/@RYOKU_ISO_TITLE@ (RAM)
+    protocol: linux
+    path: boot():/boot/vmlinuz
+    module_path: boot():/boot/initrd
+    cmdline: root=live:CDLABEL=VOID_LIVE ro init=/sbin/init rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 gpt add_efi_memmap vconsole.unicode=1 vconsole.keymap=us locale.LANG=en_US.UTF-8 rd.live.ram console=tty1 console=ttyS0,115200n8 rd.overlayfs=1
+
+/@RYOKU_ISO_TITLE@ (graphics disabled)
+    protocol: linux
+    path: boot():/boot/vmlinuz
+    module_path: boot():/boot/initrd
+    cmdline: root=live:CDLABEL=VOID_LIVE ro init=/sbin/init rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 gpt add_efi_memmap vconsole.unicode=1 vconsole.keymap=us locale.LANG=en_US.UTF-8 nomodeset console=tty1 console=ttyS0,115200n8 rd.overlayfs=1
+
+/@RYOKU_ISO_TITLE@ with speech
+    protocol: linux
+    path: boot():/boot/vmlinuz
+    module_path: boot():/boot/initrd
+    cmdline: root=live:CDLABEL=VOID_LIVE ro init=/sbin/init rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 gpt add_efi_memmap vconsole.unicode=1 vconsole.keymap=us locale.LANG=en_US.UTF-8 live.accessibility live.autologin console=tty1 console=ttyS0,115200n8 rd.overlayfs=1
+
+/@RYOKU_ISO_TITLE@ with speech (RAM)
+    protocol: linux
+    path: boot():/boot/vmlinuz
+    module_path: boot():/boot/initrd
+    cmdline: root=live:CDLABEL=VOID_LIVE ro init=/sbin/init rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 gpt add_efi_memmap vconsole.unicode=1 vconsole.keymap=us locale.LANG=en_US.UTF-8 live.accessibility live.autologin rd.live.ram console=tty1 console=ttyS0,115200n8 rd.overlayfs=1
+
+/@RYOKU_ISO_TITLE@ with speech (graphics disabled)
+    protocol: linux
+    path: boot():/boot/vmlinuz
+    module_path: boot():/boot/initrd
+    cmdline: root=live:CDLABEL=VOID_LIVE ro init=/sbin/init rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 gpt add_efi_memmap vconsole.unicode=1 vconsole.keymap=us locale.LANG=en_US.UTF-8 live.accessibility live.autologin nomodeset console=tty1 console=ttyS0,115200n8 rd.overlayfs=1
+
+/Run Memtest86+ (RAM test)
+    if_fw_type: UEFI
+    protocol: efi
+    path: boot():/boot/memtest.efi
+
+/Run Memtest86+ (RAM test)
+    if_fw_type: BIOS
+    protocol: linux
+    path: boot():/boot/memtest.bin
+
+/System restart
+    if_fw_type: UEFI
+    protocol: efi
+    path: boot():/boot/limine/restart.efi
+
+/System shutdown
+    if_fw_type: UEFI
+    protocol: efi
+    path: boot():/boot/limine/shutdown.efi

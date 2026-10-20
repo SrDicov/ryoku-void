@@ -1,0 +1,29 @@
+#!/bin/sh
+# Void has no environment.d reader, so this profile hook supplies the login session.
+# Match systemd's directory precedence and lexical override order.
+
+[ -d /run/systemd/system ] && return 0 2>/dev/null
+
+for _ryoku_envd_dir in /usr/lib/environment.d /etc/environment.d "${XDG_CONFIG_HOME:-$HOME/.config}/environment.d"; do
+	[ -d "$_ryoku_envd_dir" ] || continue
+	for _ryoku_envd_file in "$_ryoku_envd_dir"/*.conf; do
+		[ -r "$_ryoku_envd_file" ] || continue
+		while IFS= read -r _ryoku_envd_line || [ -n "$_ryoku_envd_line" ]; do
+			# Reject shell syntax before eval; environment.d expands variables but runs no commands.
+			# shellcheck disable=SC2016,SC1003
+			case $_ryoku_envd_line in
+				''|'#'*) continue ;;
+				*'`'*|*'$('*|*'"'*|*'\'*) continue ;;
+				*=*) ;;
+				*) continue ;;
+			esac
+			_ryoku_envd_key=${_ryoku_envd_line%%=*}
+			case $_ryoku_envd_key in
+				''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
+			esac
+			_ryoku_envd_val=${_ryoku_envd_line#*=}
+			eval "export $_ryoku_envd_key=\"$_ryoku_envd_val\""
+		done < "$_ryoku_envd_file"
+	done
+done
+unset _ryoku_envd_dir _ryoku_envd_file _ryoku_envd_line _ryoku_envd_key _ryoku_envd_val

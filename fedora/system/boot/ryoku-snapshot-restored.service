@@ -1,0 +1,17 @@
+[Unit]
+# Runs on the first boot after `ryoku boot-menu restore` made a snapshot the
+# root again; the restore leaves the flag inside the restored root. /boot is
+# not part of the snapshot, so it still lists kernels the restored root has no
+# modules for: those entries are dropped, the restored root's own kernels get
+# entries, and the kernel this boot runs becomes the default.
+Description=Ryoku boot entries after a snapshot restore
+ConditionPathExists=/etc/ryoku/snapshot-restored
+ConditionKernelCommandLine=!rd.ryoku.preview
+RequiresMountsFor=/boot /.snapshots
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ryoku boot-menu restored
+
+[Install]
+WantedBy=multi-user.target

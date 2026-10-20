@@ -9,7 +9,7 @@
 // exactly one page -- no overlap.
 var rows = [
     {
-        "tab": "",
+        "tab": "Region & fonts",
         "group": "LANGUAGE & REGION",
         "key": "language",
         "label": "Language",
@@ -21,7 +21,7 @@ var rows = [
         // language never means editing this file.
         "set": "languages"
     }, {
-        "tab": "",
+        "tab": "Region & fonts",
         "group": "LANGUAGE & REGION",
         "key": "formatLocale",
         "label": "Regional formats",
@@ -30,7 +30,15 @@ var rows = [
         "src": "shell",
         "set": "locales"
     }, {
-        "tab": "",
+        "tab": "Region & fonts",
+        "group": "LANGUAGE & REGION",
+        "key": "general.clock_format_24_h",
+        "label": "24-hour time",
+        "desc": "Use 24-hour time everywhere in Ryoku. Turn off for 12-hour time with AM/PM.",
+        "ctl": "sw",
+        "src": "shell"
+    }, {
+        "tab": "Region & fonts",
         "group": "LOCATION",
         "key": "weatherLocation",
         "label": "Location",
@@ -38,14 +46,14 @@ var rows = [
         "ctl": "location",
         "src": "shell"
     }, {
-        "tab": "",
+        "tab": "Region & fonts",
         "group": "LOCATION",
         "key": "timezone",
         "label": "Time zone",
         "desc": "The system clock's time zone; applied live.",
         "ctl": "timezone"
     }, {
-        "tab": "",
+        "tab": "Region & fonts",
         "group": "LOCATION",
         "key": "weatherUnit",
         "label": "Temperature units",
@@ -54,16 +62,25 @@ var rows = [
         "src": "shell",
         "opts": ["auto", "celsius", "fahrenheit"]
     }, {
-        "tab": "",
+        "tab": "Region & fonts",
         "group": "FONT",
         "key": "fontFamily",
         "label": "System font",
-        "desc": "One font for the shell, apps and terminal.",
+        "desc": "The proportional face used by the shell and apps.",
         "ctl": "pick",
         "src": "shell",
         "opts": []
     }, {
-        "tab": "",
+        "tab": "Region & fonts",
+        "group": "FONT",
+        "key": "terminalFontFamily",
+        "label": "Terminal font",
+        "desc": "The monospace face used by terminals and code.",
+        "ctl": "pick",
+        "src": "shell",
+        "opts": []
+    }, {
+        "tab": "Region & fonts",
         "group": "FONT",
         "key": "fontSize",
         "label": "Font size",
@@ -73,5 +90,16 @@ var rows = [
         "lo": 8,
         "hi": 24,
         "unit": " pt"
+    }, {
+        "tab": "Region & fonts",
+        "group": "FONT",
+        "key": "fontScale",
+        "label": "Interface scale",
+        "desc": "Scales the shell surfaces and popouts together.",
+        "ctl": "slid",
+        "src": "shell",
+        "lo": 0.8,
+        "hi": 1.5,
+        "pct": true
     }
 ];

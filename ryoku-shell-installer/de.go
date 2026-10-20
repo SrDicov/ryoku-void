@@ -254,6 +254,9 @@ func parseKwinOutputs(b []byte) []niriOutput {
 
 func kwinOutput(name string, node map[string]any) niriOutput {
 	o := niriOutput{name: name}
+	if enabled, ok := node["enabled"].(bool); ok {
+		o.off = !enabled
+	}
 	if mode, ok := node["mode"].(map[string]any); ok {
 		w, wok := mode["width"].(float64)
 		h, hok := mode["height"].(float64)
@@ -312,40 +315,116 @@ func (f *facts) deSalvage() {
 	}
 }
 
-// themeCurrent folds one config file's [Theme] Current= over the previous
-// winner; SDDM reads /etc/sddm.conf then conf.d in lexical order and later
-// files win per key.
-func themeCurrent(text, prev string) string {
+// themeCurrent returns the last active [Theme] Current= assignment in one
+// file. SDDM removes comments before parsing entries.
+func themeCurrent(text string) (string, bool) {
 	section := ""
+	current := ""
+	found := false
 	for _, ln := range strings.Split(text, "\n") {
+		if before, _, ok := strings.Cut(ln, "#"); ok {
+			ln = before
+		}
 		t := strings.TrimSpace(ln)
-		if strings.HasPrefix(t, "[") {
+		if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
 			section = t
 			continue
 		}
 		if section != "[Theme]" {
 			continue
 		}
-		if v, ok := strings.CutPrefix(t, "Current="); ok {
-			prev = strings.TrimSpace(v)
+		if key, value, ok := strings.Cut(t, "="); ok && strings.TrimSpace(key) == "Current" {
+			current = strings.TrimSpace(value)
+			found = true
 		}
 	}
-	return prev
+	return current, found
 }
 
-// effectiveSDDMTheme resolves which greeter theme SDDM will actually use.
-func effectiveSDDMTheme() string {
-	files := []string{"/etc/sddm.conf"}
-	if m, err := filepath.Glob("/etc/sddm.conf.d/*"); err == nil {
-		files = append(files, m...) // glob output is sorted
-	}
-	theme := ""
-	for _, f := range files {
-		if b, err := os.ReadFile(f); err == nil {
-			theme = themeCurrent(string(b), theme)
+type sddmThemeState struct {
+	current string
+	source  string
+}
+
+func sddmPath(root, path string) string {
+	return filepath.Join(root, strings.TrimPrefix(path, "/"))
+}
+
+// effectiveSDDMThemeAt mirrors ConfigBase::load in SDDM 0.21: vendor
+// drop-ins, administrator drop-ins, then /etc/sddm.conf, with later entries
+// replacing earlier ones.
+func effectiveSDDMThemeAt(root, defaultTheme string) sddmThemeState {
+	state := sddmThemeState{current: defaultTheme, source: "built-in default"}
+	var files []string
+	for _, dir := range []string{"/usr/lib/sddm/sddm.conf.d", "/etc/sddm.conf.d"} {
+		if matches, err := filepath.Glob(filepath.Join(sddmPath(root, dir), "*")); err == nil {
+			files = append(files, matches...)
 		}
 	}
-	return theme
+	files = append(files, sddmPath(root, "/etc/sddm.conf"))
+	for _, path := range files {
+		if b, err := os.ReadFile(path); err == nil {
+			if current, ok := themeCurrent(string(b)); ok {
+				state.current = current
+				state.source = path
+			}
+		}
+	}
+	return state
+}
+
+func effectiveSDDMTheme() string {
+	return effectiveSDDMThemeAt("/", "").current
+}
+
+const (
+	ryokuSDDMThemeStart = "# BEGIN ryoku-shell-install greeter selection"
+	ryokuSDDMThemeEnd   = "# END ryoku-shell-install greeter selection"
+)
+
+func setRyokuSDDMMainTheme(text string, enabled bool) string {
+	removed := false
+	for {
+		start := strings.Index(text, ryokuSDDMThemeStart)
+		if start < 0 {
+			break
+		}
+		endRel := strings.Index(text[start:], ryokuSDDMThemeEnd)
+		if endRel < 0 {
+			break
+		}
+		end := start + endRel + len(ryokuSDDMThemeEnd)
+		if end < len(text) && text[end] == '\n' {
+			end++
+		}
+		text = text[:start] + text[end:]
+		removed = true
+	}
+	if !enabled && !removed {
+		return text
+	}
+	text = strings.TrimRight(text, "\n")
+	if !enabled {
+		if text == "" {
+			return ""
+		}
+		return text + "\n"
+	}
+	if text != "" {
+		text += "\n\n"
+	}
+	return text + ryokuSDDMThemeStart + "\n[Theme]\nCurrent=ryoku\n" + ryokuSDDMThemeEnd + "\n"
+}
+
+func updateRyokuSDDMMainTheme(text string, enabled bool) (string, bool) {
+	if enabled {
+		current, active := themeCurrent(text)
+		if !active || current == "ryoku" {
+			return text, false
+		}
+	}
+	next := setRyokuSDDMMainTheme(text, enabled)
+	return next, next != text
 }
 
 func hasDesktop(desktops []string, name string) bool {

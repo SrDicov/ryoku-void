@@ -1,0 +1,8 @@
+#!/bin/sh
+exec 2>&1
+. "${RYOKU_INIT_LIB:-/usr/lib/ryoku/runit}/wait-for"
+load_session_env
+wait_service bluetoothd "${RYOKU_WAIT_BLUETOOTHD:-60}" || exec sv down .
+
+# Keep stdin open so bluetoothctl remains registered as the pairing agent.
+exec /bin/sh -c 'tail -f /dev/null | exec bluetoothctl --agent KeyboardDisplay'

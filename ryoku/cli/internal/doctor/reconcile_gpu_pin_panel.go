@@ -29,9 +29,13 @@ var drmRoot = "/sys/class/drm"
 // pinFirstDriver resolves the leftmost entry of the effective AQ_DRM_DEVICES
 // pin to its kernel driver, "" when there is no pin or it cannot be resolved.
 // The verdict comes from ryoku-gpu itself (the same tool the stale-pin
-// reconciler trusts), so this never re-implements the pin policy.
+// reconciler trusts), so this never re-implements the pin policy. --effective
+// reads the pin the compositor would actually read, straight from the pin
+// file: the plain order is the policy's recommendation and refuses to speak
+// exactly when a stored hybrid/passthrough choice coexists with a pin: the
+// drifted and forced-pin states the #270 guard most needs to see.
 var pinFirstDriver = func() string {
-	out, err := sys.RunOut("ryoku-gpu", "order")
+	out, err := sys.RunOut("ryoku-gpu", "order", "--effective")
 	if err != nil {
 		return ""
 	}
@@ -96,6 +100,9 @@ func renderPinPanelRisk(laptop bool, panelDriver, pinFirst string) bool {
 }
 
 func reconcileRenderPinPanel(checkOnly bool) recResult {
+	if !gpuPinSupported() {
+		return okRes(i18n.T("the active window manager has no render-pin capability"))
+	}
 	pin := pinFirstDriver()
 	panel := panelDriver()
 	if !renderPinPanelRisk(isLaptop(), panel, pin) {

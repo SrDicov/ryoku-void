@@ -1,0 +1,16 @@
+#!/bin/sh
+# Render systemd's XDG environment generator output as Turnstile envdir files.
+set -eu
+
+target=${1:-${TURNSTILE_ENV_DIR:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ryoku/env}}
+
+[ -f "$HOME/.config/user-dirs.dirs" ] || exit 0
+command -v xdg-user-dir >/dev/null 2>&1 || exit 0
+
+mkdir -p "$target"
+for dir in PICTURES DOWNLOAD DOCUMENTS MUSIC VIDEOS DESKTOP PUBLICSHARE TEMPLATES; do
+	path=$(xdg-user-dir "$dir" 2>/dev/null) || continue
+	[ -n "$path" ] || continue
+	# chpst -e treats a trailing newline as part of the value.
+	printf '%s' "$path" > "$target/XDG_${dir}_DIR"
+done

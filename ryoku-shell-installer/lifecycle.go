@@ -23,6 +23,58 @@ type runState struct {
 	Completed []string `json:"completed"`
 	BackupDir string   `json:"backupDir"`
 	Updated   string   `json:"updated"`
+	Ref       string   `json:"ref,omitempty"`
+	Delivery  string   `json:"delivery,omitempty"`
+}
+
+// refBoundSteps depend on the payload ref: its checkout, the [ryoku] channel
+// that ref is built against, and the package set installed from it.
+var refBoundSteps = map[string]bool{"payload": true, "repo": true, "packages": true, "build": true}
+
+// adoptRef makes a resume from another ref (the unstable script after a
+// stable run, or back) redo the ref-bound steps, so the payload, the channel
+// and the packages all come from the same ref. a state written before refs
+// were recorded came from a main run.
+func (s *runState) adoptRef(ref string) {
+	prev := s.Ref
+	if prev == "" {
+		prev = "main"
+	}
+	if prev == ref {
+		return
+	}
+	kept := s.Completed[:0]
+	for _, c := range s.Completed {
+		if !refBoundSteps[c] {
+			kept = append(kept, c)
+		}
+	}
+	s.Completed = kept
+	s.Ref = ref
+}
+
+// adoptPackagedVoid invalidates source-lane work recorded by an older Void
+// installer. A current run records its delivery model, so ordinary resumes keep
+// skipping completed package and session work.
+func (s *runState) adoptPackagedVoid() {
+	if s.Delivery == "packages" {
+		return
+	}
+	keep := map[string]bool{
+		"sysupgrade": true,
+		"tools":      true,
+		"backup":     true,
+		"conflicts":  true,
+		"shell":      true,
+	}
+	completed := s.Completed[:0]
+	for _, id := range s.Completed {
+		if keep[id] {
+			completed = append(completed, id)
+		}
+	}
+	s.Completed = completed
+	s.Delivery = "packages"
 }
 
 func statePath(home string) string {
@@ -62,6 +114,12 @@ func (e *engine) markStepDone(id string) {
 	if !e.state.has(id) {
 		e.state.Completed = append(e.state.Completed, id)
 	}
+	e.state.Ref = e.ref
+	if e.d().fromSource {
+		e.state.Delivery = "source"
+	} else {
+		e.state.Delivery = "packages"
+	}
 	if e.backupDir != "" {
 		e.state.BackupDir = e.backupDir
 	}
@@ -100,12 +158,12 @@ func confirm(rd *bufio.Reader, q string, yes bool) bool {
 	return ln == "y" || ln == "yes"
 }
 
-// runUninstall removes the ryoku packages, retires the [ryoku] repo stanza,
-// then walks the backup chain newest to oldest running each restore.sh with
-// confirmation: that is the honest inverse of possibly repeated installs,
-// each script undoes exactly what its run changed (configs, disabled
-// services, display manager, shell). session packages (sddm, pipewire, ...)
-// are left alone, they may predate Ryoku and removing them can kill a box.
+// runUninstall removes the Ryoku packages, retires the configured package
+// repository, then walks the backup chain newest to oldest running each
+// restore.sh with confirmation. Each script undoes exactly what its run changed
+// (configs, disabled services, display manager, shell). Session packages (sddm,
+// pipewire, and similar) are left alone because they may predate Ryoku and
+// removing them can kill a box.
 func runUninstall(yes, dry bool) int {
 	fmt.Println(bold(cBrand, "ryoku-shell-install") + fg(cSub, " "+i18n.T("(uninstall)")))
 	home, err := os.UserHomeDir()
@@ -126,23 +184,34 @@ func runUninstall(yes, dry bool) int {
 		return c.Run()
 	}
 
-	// 1. packages, one -R transaction; ryoku-desktop depends on the rest so
-	// pacman orders the removal itself.
+	// 1. packages, one transaction. The package manager orders dependency
+	// removal itself.
+	packages := append([]string{}, ryokuPkgs...)
+	switch activeDistro.id {
+	case "void":
+		packages = append(packages, "ryoku-desktop-niri")
+	case "fedora":
+		packages = append([]string{}, fedoraRyokuPkgs...)
+	}
 	var installed []string
-	for _, p := range ryokuPkgs {
-		if activeDistro.id == "arch" && pacmanHas(p) {
-			installed = append(installed, p)
+	if activeDistro.id == "arch" || activeDistro.id == "void" || activeDistro.id == "fedora" {
+		for _, p := range packages {
+			if activeDistro.installedPkg(p) {
+				installed = append(installed, p)
+			}
 		}
 	}
 	if len(installed) == 0 {
 		fmt.Println(i18n.T("no ryoku packages installed"))
 	} else if confirm(rd, i18n.Tf("remove %s?", strings.Join(installed, " ")), yes) {
-		if err := run("sudo", append([]string{"-n", "pacman", "-R", "--noconfirm"}, installed...)...); err != nil {
-			fmt.Println(i18n.T("warning: package removal failed; fix pacman and re-run (continuing with restore)"))
+		args := append([]string{"-n"}, activeDistro.removeArgs(installed)...)
+		if err := run("sudo", args...); err != nil {
+			fmt.Println(i18n.T("warning: package removal failed; fix the package manager and re-run (continuing with restore)"))
 		}
 	}
 
-	// 2. the [ryoku] repo stanza; original kept next to it.
+	// 2. the package repository override; package-owned stable defaults leave
+	// with ryoku-keyring.
 	if b, err := os.ReadFile("/etc/pacman.conf"); err == nil && activeDistro.id == "arch" && ryokuStanzaRe.Match(b) {
 		if confirm(rd, i18n.T("drop the [ryoku] repository from /etc/pacman.conf?"), yes) {
 			stripped := stripPacmanSection(string(b), "ryoku")
@@ -156,6 +225,35 @@ func runUninstall(yes, dry bool) int {
 					if err := c.Run(); err != nil {
 						fmt.Println(i18n.T("warning: could not rewrite /etc/pacman.conf"))
 					}
+				}
+			}
+		}
+	}
+	if _, err := os.Stat(voidRepoConfig); err == nil && activeDistro.id == "void" {
+		if confirm(rd, i18n.Tf("drop the Ryoku XBPS repository override %s?", voidRepoConfig), yes) {
+			if err := run("sudo", "-n", "rm", "-f", voidRepoConfig); err != nil {
+				fmt.Println(i18n.T("warning: could not remove the Ryoku XBPS repository override"))
+			}
+		}
+	}
+	if activeDistro.id == "fedora" {
+		paths := []string{fedoraRepoConfigPath()}
+		// ryoku-keyring owns the key file and took it with the packages; only
+		// an install from before that package leaves it unowned.
+		if _, err := probeCommand("rpm", "-qf", fedoraKeyPath); err != nil {
+			paths = append(paths, fedoraKeyPath)
+		}
+		coprs, _ := filepath.Glob(filepath.Join(fedoraRepoDir, "ryoku-copr-*.repo"))
+		paths = append(paths, coprs...)
+		if confirm(rd, i18n.T("remove the Ryoku RPM repository files and signing key?"), yes) {
+			args := append([]string{"-n", "rm", "-f"}, paths...)
+			if err := run("sudo", args...); err != nil {
+				fmt.Println(i18n.T("warning: could not remove the Ryoku RPM repository files and signing key"))
+			}
+			// Deleting the file does not untrust the key rpm imported from it.
+			if untrust := fedoraKeyUntrustCommand(probeCommand); untrust != nil {
+				if err := run("sudo", append([]string{"-n"}, untrust...)...); err != nil {
+					fmt.Println(i18n.Tf("warning: rpm still trusts the Ryoku signing key; remove it with sudo %s", strings.Join(untrust, " ")))
 				}
 			}
 		}
@@ -198,4 +296,30 @@ func runUninstall(yes, dry bool) int {
 	fmt.Println(i18n.T("kept: session packages (sddm, networkmanager, pipewire, ...) and the backups"))
 	fmt.Println(i18n.Tf("under %s; delete those directories once you are sure.", root))
 	return 0
+}
+
+// probeCommand runs a read-only query and returns its output.
+func probeCommand(name string, args ...string) (string, error) {
+	out, err := exec.Command(name, args...).Output()
+	return string(out), err
+}
+
+// fedoraKeyUntrustCommand is the command that drops the pinned Ryoku key from
+// the rpm keyring, or nil when rpm does not trust it. rpm 6 lists and deletes
+// keys by fingerprint; older rpm keeps each key as a gpg-pubkey package named
+// after the fingerprint's last eight digits.
+func fedoraKeyUntrustCommand(probe func(string, ...string) (string, error)) []string {
+	fingerprint := strings.ToLower(fedoraKeyFingerprint)
+	if out, err := probe("rpmkeys", "--list"); err == nil {
+		for _, line := range strings.Split(out, "\n") {
+			if fields := strings.Fields(line); len(fields) > 0 && strings.ToLower(fields[0]) == fingerprint {
+				return []string{"rpmkeys", "--delete", fingerprint}
+			}
+		}
+	}
+	legacy := "gpg-pubkey-" + fingerprint[len(fingerprint)-8:]
+	if _, err := probe("rpm", "-q", legacy); err == nil {
+		return []string{"rpm", "-e", legacy}
+	}
+	return nil
 }

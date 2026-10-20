@@ -1,0 +1,41 @@
+# Maintainer: Ryoku <releases@ryoku.dev>
+#
+# ryoku-keysounds-niri: niri's key-press engine. niri has no plugin system, so
+# where Hyprland loads a keysounds plugin, niri runs this small daemon instead
+# (ryoku/keysounds/main.rs). It reads the keyboard straight from evdev, plays
+# each press through libcanberra, and is started by a guarded line in niri's
+# autostart. It is installed on demand from the Hub (Window Manager > Behaviour),
+# not with the desktop, so a box that wants no key sounds carries neither it nor
+# the samples.
+#
+# The daemon is one Rust file with no crate tree, so the build is a single rustc
+# call; it links libcanberra, the freedesktop event-sound library, which caches
+# and mixes playback so niri itself does no per-keystroke work.
+pkgname=ryoku-keysounds-niri
+pkgver=${RYOKU_PKGVER:-0.1.0}
+pkgrel=1
+pkgdesc="niri key-press sounds: a small evdev+libcanberra engine, niri's plugin substitute"
+arch=('x86_64')
+url="https://ryoku.dev"
+license=('GPL-3.0-or-later')
+# rust builds the daemon; the samples and the importer come from the shared
+# profiles package, so niri and Hyprland key sounds never double up on disk.
+makedepends=('rust' 'libcanberra')
+depends=("ryoku-keysounds-profiles=$pkgver" 'libcanberra')
+source=()
+
+_repo="$startdir/../../.."
+
+build() {
+  RYOKU_SRC="$_repo" \
+    RYOKU_PKGVER="$pkgver" \
+    RYOKU_BUILD_DIR="$srcdir" \
+    "$startdir/payload.sh" build
+}
+
+package() {
+  RYOKU_SRC="$_repo" \
+    RYOKU_PKGVER="$pkgver" \
+    RYOKU_BUILD_DIR="$srcdir" \
+    "$startdir/payload.sh" install "$pkgdir"
+}

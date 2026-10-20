@@ -1,0 +1,15 @@
+# base.packages and aur.packages names the CachyOS layer (cachyos.packages)
+# replaces. A CachyOS install never carries them: pacstrap and the AUR step leave
+# them out, the offline ISO does not bake them, and the installer records them in
+# the provisioning ledger so `ryoku update` does not deliver them later. One
+# package per line.
+
+# The stock kernel: CachyOS boots linux-cachyos with linux-cachyos-lts as the
+# fallback. linux-headers is not listed: ryoku-desktop depends on it by name
+# (for xpadneo-dkms) and no CachyOS headers package provides that name, so it
+# lands with the desktop either way.
+linux
+
+# The AUR helper: CachyOS ships yay in [cachyos], so the box updates it from the
+# repo instead of carrying an AUR build of yay-bin.
+yay-bin

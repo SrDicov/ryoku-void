@@ -88,7 +88,7 @@ func paletteBridgeCommand(path string, args ...string) error {
 }
 
 func paletteBridgeUnitState(verb string) bool {
-	_, err := paletteBridgeRun("systemctl", "--user", verb, "--quiet", paletteBridgeUnit)
+	_, err := paletteBridgeRun("ryoku-host", "svc", "--user", verb, paletteBridgeUnit)
 	return err == nil
 }
 
@@ -114,7 +114,7 @@ func paletteBridgeStatusFor(source string) paletteBridgeStatus {
 	config := paletteBridgeConfigRoot()
 	managed := paletteBridgeManagedFiles()
 	spotify := filepath.Join(config, "spicetify", "Extensions", "ryoku-wallpaper-colors.js")
-	vesktop := filepath.Join(config, "vesktop", "themes", "midnight-ryoku.theme.css")
+	vesktop := filepath.Join(config, "ryoku", "user_edits", "matugen", "templates", "vesktop-colors.css")
 	zen := filepath.Join(config, "ryoku", "user_edits", "matugen", "templates", "zen.css")
 	_, binErr := exec.LookPath("ryoku-palette-bridge")
 	_, sourceErr := paletteBridgeSource(source, "install.sh", "install-integrations.sh")
@@ -178,9 +178,9 @@ func runPaletteBridge(args []string) error {
 		}
 		verb := args[1]
 		if verb == "enable" || verb == "disable" {
-			return paletteBridgeCommand("systemctl", "--user", verb, "--now", paletteBridgeUnit)
+			return paletteBridgeCommand("ryoku-host", "svc", "--user", verb, "--now", paletteBridgeUnit)
 		}
-		return paletteBridgeCommand("systemctl", "--user", "restart", paletteBridgeUnit)
+		return paletteBridgeCommand("ryoku-host", "svc", "--user", "restart", paletteBridgeUnit)
 	case "doctor":
 		doctor, lookupErr := exec.LookPath("ryoku-palette-bridge-doctor")
 		if lookupErr != nil {

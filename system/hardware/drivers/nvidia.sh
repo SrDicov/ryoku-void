@@ -13,6 +13,7 @@
 set -euo pipefail
 
 RYOKU_DRYRUN="${RYOKU_DRYRUN:-0}"
+DRIVER_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 for arg in "$@"; do
   case "$arg" in
     --dry-run) RYOKU_DRYRUN=1 ;;
@@ -46,16 +47,14 @@ write_root() {
   if (( EUID == 0 )); then cat >"$path"; else sudo -n tee "$path" >/dev/null; fi
 }
 
-PM=(pacman)
+PKG=(ryoku-host pkg)
 PRIV=()
 if (( EUID != 0 )); then
-  PM=(sudo -n pacman)
+  PKG=(sudo -n ryoku-host pkg)
   PRIV=(sudo -n)
 fi
-# offline install: see amd.sh -- only the baked repo has a synced db.
-if [[ -f ${RYOKU_PACMAN_CONF:-} ]]; then PM+=(--config "$RYOKU_PACMAN_CONF"); fi
 
-pkg_installed() { pacman -Qq "$1" >/dev/null 2>&1; }
+pkg_installed() { ryoku-host pkg installed "$1" >/dev/null 2>&1; }
 
 install_pkgs() {
   local missing=() p
@@ -65,7 +64,7 @@ install_pkgs() {
     return 0
   fi
   echo "nvidia.sh: installing ${missing[*]}"
-  run "${PM[@]}" -S --needed --noconfirm "${missing[@]}"
+  run "${PKG[@]}" install "${missing[@]}"
 }
 
 has_lspci() { command -v lspci >/dev/null 2>&1; }
@@ -104,21 +103,26 @@ nvidia_is_kepler() {
   lspci | grep -i 'nvidia' | grep -qE '(^|[^[:alnum:]])GK[0-9]+'
 }
 
+# Void's packaged branches start at Kepler. Explicitly recognize the generations
+# in between so an older or unknown card is never sent to a proprietary branch
+# that cannot bind it.
+nvidia_is_maxwell_volta() {
+  has_lspci || return 1
+  lspci | grep -i 'nvidia' | grep -qE '(^|[^[:alnum:]])G(M|P|V)[0-9]+'
+}
+
 # prebuilt_for <kernel-pkgbase>: print the kernel-matched prebuilt open-module
 # package for that kernel when a synced repo actually carries one, else fail.
 # Stock linux is nvidia-open in [extra]; distro kernels follow the
 # <pkgbase>-nvidia-open convention (CachyOS ships linux-cachyos-nvidia-open,
 # #214). The repo query is what makes the mapping honest: a name no synced db
 # carries (a hand-built kernel, or an offline ISO that never baked it) must
-# fall through to DKMS rather than abort the transaction. The query is
-# read-only (no sudo needed) and rides the same pacman config the install
-# uses, so an offline install sees the baked repo, not an unsynced host db.
+# fall through to DKMS rather than abort the transaction. ryoku-host applies
+# the same offline package configuration as the install transaction.
 prebuilt_for() {
   local kb=$1 cand
   if [[ $kb == linux ]]; then cand=nvidia-open; else cand="$kb-nvidia-open"; fi
-  local q=(pacman -Si "$cand")
-  [[ -n ${RYOKU_PACMAN_CONF:-} ]] && q=(pacman --config "$RYOKU_PACMAN_CONF" -Si "$cand")
-  "${q[@]}" >/dev/null 2>&1 && printf '%s\n' "$cand"
+  ryoku-host pkg available "$cand" >/dev/null 2>&1 && printf '%s\n' "$cand"
 }
 
 if ! has_nvidia; then
@@ -126,11 +130,40 @@ if ! has_nvidia; then
   exit 0
 fi
 
+case $(ryoku-host pkgmgr) in
+  xbps)
+    # Package names, dracut policy and kernel hooks stay isolated from the
+    # pacman path below.
+    # shellcheck source=nvidia-xbps.sh
+    source "$DRIVER_DIR/nvidia-xbps.sh"
+    exit $?
+    ;;
+  dnf)
+    echo "nvidia.sh: Fedora manages NVIDIA drivers and dracut outside this Arch/Void helper; no changes made."
+    exit 0
+    ;;
+  pacman) ;;
+  *)
+    echo "nvidia.sh: unsupported package manager; no changes made." >&2
+    exit 1
+    ;;
+esac
+
 # an installed module package stays: CachyOS boxes ship kernel-matched
 # prebuilt modules (linux-cachyos-nvidia-open) that provide NVIDIA-MODULE,
 # and adding a -dkms package conflicts with it, aborting the transaction.
 have_module_pkg() {
-  pacman -Qq 2>/dev/null | grep -qE '^(nvidia(-open)?(-dkms|-lts)?|linux-.*-nvidia(-open)?)$'
+  local candidates=(nvidia nvidia-open nvidia-dkms nvidia-open-dkms nvidia-lts nvidia-open-lts)
+  local pb kb pkg
+  for pb in "${RYOKU_MODULES_DIR:-/usr/lib/modules}"/*/pkgbase; do
+    [[ -r $pb ]] || continue
+    read -r kb <"$pb"
+    candidates+=("$kb-nvidia" "$kb-nvidia-open")
+  done
+  for pkg in "${candidates[@]}"; do
+    pkg_installed "$pkg" && return 0
+  done
+  return 1
 }
 
 # nvidia_module_present: is the nvidia kernel module actually available for an
@@ -168,10 +201,11 @@ else
   # per-kernel-transaction compile (#214). Only a kernel with no prebuilt in
   # any synced repo falls to nvidia-open-dkms. Kepler is the older 470xx legacy
   # branch. Maxwell/Pascal/Volta are not covered by the open modules and use
-  # the AUR 580xx branch. The ISO bakes both legacy branches into the offline
-  # repo best-effort (they are large vendor blobs), so these usually install
-  # with no network; when a bake was skipped the card falls back to
-  # nouveau/mesa. Headers cover the DKMS build.
+  # the 580xx branch (AUR; [cachyos] on the CachyOS edition). The ISO bakes
+  # both legacy branches into the offline repo, fetched from [cachyos] where it
+  # serves them and otherwise built from the AUR best-effort (they are large
+  # vendor blobs), so these usually install with no network; when a bake was
+  # skipped the card falls back to nouveau/mesa. Headers cover the DKMS build.
   headers=()
   for kb in "${kernels[@]}"; do headers+=("${kb}-headers"); done
   multilib=0

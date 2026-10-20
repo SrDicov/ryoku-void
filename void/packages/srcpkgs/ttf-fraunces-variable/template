@@ -1,0 +1,19 @@
+# Template file for 'ttf-fraunces-variable'
+pkgname=ttf-fraunces-variable
+version=1.000
+revision=1
+create_wrksrc=yes
+hostmakedepends="unzip"
+short_desc="Fraunces variable display typeface"
+maintainer="Ryoku <releases@ryoku.dev>"
+license="OFL-1.1"
+homepage="https://github.com/undercasetype/Fraunces"
+distfiles="${homepage}/releases/download/${version}/UnderCaseType_Fraunces_${version}.zip"
+checksum=8d8b81dfaeb89433f5c908e1d8d0a4b202bd627bd80d4cd5ff56f311fdcad19f
+font_dirs="/usr/share/fonts/TTF"
+
+
+do_install() {
+	vinstall "UnderCaseType_Fraunces_${version}/Fonts - Desktop/Fraunces[SOFT,WONK,opsz,wght].ttf" 644 usr/share/fonts/TTF Fraunces-Variable.ttf
+	vinstall "UnderCaseType_Fraunces_${version}/Fonts - Desktop/Fraunces-Italic[SOFT,WONK,opsz,wght].ttf" 644 usr/share/fonts/TTF Fraunces-Italic-Variable.ttf
+}

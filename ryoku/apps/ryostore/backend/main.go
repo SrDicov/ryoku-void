@@ -105,8 +105,9 @@ func runCatalog(w io.Writer, provs []Provider, args []string) error {
 		// cache, so this never does worse than serving the snapshot. A snapshot
 		// built under another window manager is stale the same way: it answers
 		// which products run here, and after a compositor switch that answer is
-		// the old one.
-		if data, err := os.ReadFile(snapshot); err == nil && len(data) > 0 && !snapshotOffline(data) && !snapshotForeignWindowManager(data) {
+		// the old one. One whose built-in styles read differently predates this
+		// binary.
+		if data, err := os.ReadFile(snapshot); err == nil && len(data) > 0 && !snapshotOffline(data) && !snapshotForeignWindowManager(data) && !snapshotStaleBuiltins(data) {
 			_, err := w.Write(data)
 			return err
 		}
@@ -306,8 +307,9 @@ func runRemove(provs []Provider, args []string) error {
 }
 
 // runInternal namespaces commands the extras actuator and Settings call
-// directly: the browse cache directory, an on-demand script installer path, and
-// the guest install/remove primitives. These are not public UI commands.
+// directly: the browse cache directory, this edition's bundle package table, an
+// on-demand script installer path, and the guest install/remove primitives.
+// These are not public UI commands.
 func runInternal(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("internal needs a subcommand")
@@ -315,6 +317,12 @@ func runInternal(args []string) error {
 	switch args[0] {
 	case "cache":
 		fmt.Println(extrasCacheDir())
+		return nil
+	case "package-table":
+		// Empty on pacman hosts, whose package names are the catalogue's.
+		if path := ensureBundlePackageTable(context.Background(), newCache(), false); path != "" {
+			fmt.Println(path)
+		}
 		return nil
 	case "installer":
 		if len(args) < 2 {

@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/share/polkit-1/rules.d/*-ryoku-*.rules
+
+[Action]
+Description = Reloading Ryoku authorization rules...
+When = PostTransaction
+Exec = /usr/bin/ryoku-polkit-reload

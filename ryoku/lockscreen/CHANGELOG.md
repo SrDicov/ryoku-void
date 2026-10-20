@@ -2,12 +2,74 @@
 
 ## Unreleased
 
+### Added
+- **The login screen comes back when its greeter dies.** SDDM 0.21 reports a
+  Wayland greeter that died, compositor or greeter client, crash or exit, as a
+  finished login (`sddm-helper-start-wayland` quits with 0, the daemon reads
+  `HELPER_SUCCESS` and starts nothing), so a box whose greeter failed once sat
+  on an empty VT with a blinking cursor and nothing to log in to. Two pieces
+  close that: `ryoku-greeter` now supervises weston and starts it again when
+  it dies before the greeter connects (the card re-chosen each time, every
+  death logged with weston's last lines), and the new `ryoku-greeter-guard`
+  service restarts the display manager when it runs with no greeter and no
+  session for 20s, three times per boot at most. Both say what happened in
+  the system log under their tags; the guard's last word names the helper log
+  (`/var/lib/sddm/.local/share/sddm-helper-start-wayland/sddm.log`) that holds
+  the greeter client's own exit (`tests/sddm-greeter-supervise.sh`,
+  `tests/sddm-greeter-guard.sh`).
+- The built-in in-session clockwork lockscreen follows the global 12/24-hour preference, including AM/PM.
+
 ### Fixed
-- **The lock can be unlocked on a box without systemd.** The unlock guard
-  required `systemctl`, `systemd-run` and `systemd-inhibit` and exited 1
-  without them, so on a runit/elogind host the lock screen could never be
-  released. It now skips only the sleep-block guard when that tooling is
-  missing and still enforces the unlockable-session check and the proof.
+- **A lock whose PAM stack cannot run no longer loops.** When the password
+  conversation ended before PAM ever asked for a key (a module that will not
+  load, a service that denies outright), the in-session lock started it again
+  on the same tick and shook the field as a wrong password. One NixOS user's
+  journal showed over 70 PAM children in one second while the field shook with
+  nothing typed. Such a failure now re-arms after 1s, doubling to 30s, and
+  stays quiet; a wrong password still shakes and re-prompts at once, and a key
+  typed during the wait is tried immediately (`tests/lock-pam-backoff.sh`).
+- **The clockwork lockscreen's date turns over at midnight.** The day and date
+  labels read the date once when the lock opened, so a screen locked on
+  Thursday still said Thursday on Friday while the clock kept moving. They now
+  follow the theme's clock timer (`tests/lock-date-rollover.sh`).
+- **A login whose home has no Ryoku tree lays it before the compositor starts.**
+  `ryoku-wayland-session` runs `ryoku materialize` as the user when
+  `~/.config/ryoku` or the shell's `shell.qml` is missing, the condition
+  `ryoku-bootstrap` uses, so a user account created after install or a plain
+  package install no longer boots a bare compositor with nothing of Ryoku in
+  it. On Void this is the only place that can order the tree before niri reads
+  its config, since the runit bootstrap service only starts once the session
+  does. A home that has its tree pays nothing (`tests/wayland-session-settle.sh`).
+- **A failed Wayland desktop login returns to the sign-in screen instead of
+  leaving a black display.** The SDDM session wrapper now supervises the chosen
+  desktop, preserves its stdout in the session log, and reports compositor
+  failures with SDDM's session-error status so the greeter starts again. It also
+  warns when an NVIDIA update is waiting for a restart before launching the
+  desktop.
+- **A 2D-only VM no longer opens to an empty grey desktop.** The SDDM session
+  wrapper detects a KMS card with no render node and selects Mesa's llvmpipe GBM
+  path before starting the chosen compositor. Guests with virgl, vmwgfx, or
+  another working render node keep hardware acceleration.
+- **The login screen opens on the GPU that owns a connected display.** The
+  greeter now selects one DRM card for both Weston and its mode probe, preferring
+  a render-capable card with the connected laptop panel. This keeps a T2
+  MacBook's display-only Touch Bar card and an inactive apple-gmux GPU from
+  taking the login screen. KMS-only virtual cards still work through Pixman.
+- **A lock client cannot spill into the next login.** Its crash-recovery wrapper
+  now stops when the login1 session that started it has ended, so a reused
+  Wayland socket cannot let an old lock take over a new session.
+- **Unlock preparation and the lock's reboot and power off work under
+  elogind.** `ryoku-qylock-unlock-prepare` reads sleep inhibitors from login1
+  over D-Bus instead of `systemd-inhibit`, and the lock screen's reboot and
+  power off call `loginctl`, so both work on Void as on Arch.
+- **The login screen on a source install matches Arch.** Only the
+  `ryoku-desktop` package laid the `ryoku-greeter` launcher, so Void and other
+  source installs ran SDDM's greeter in plain weston: wrong refresh rate, no
+  output pinning, no Bibata pointer. Deploy now installs it, and `sddm/setup`
+  writes the same greeter config on runit as on systemd.
+- **`install-qylock` says what it is waiting for.** When a lock screen or a
+  qylock guard holds one of its locks, it names the lock file and how to find
+  the holder before waiting, instead of hanging silently.
 
 ### Changed
 - **The login pointer is visible again.** On a hybrid laptop whose panel is on
@@ -41,6 +103,14 @@
   this root installer). Honors `RYOKU_DRYRUN`; `ryoku keyring` changes it later.
 
 ### Fixed
+- **The login keypad follows the user's numlock choice.** The greeter forced
+  weston's numlock on for every machine, and that LED state carried into the
+  session and its lock screen, so a laptop whose letter keys the keypad
+  overlays typed the wrong characters at the password field (issue #321). The
+  compositor provider now publishes the session's effective choice to
+  `/var/lib/ryoku/greeter-numlock` on every apply and the greeter reads it;
+  with no hand-off yet (a first login) the keypad stays a keypad.
+  (`sddm/ryoku-greeter`)
 - **Lock and unlock are serialized per login1 session and qylock generation.**
   Lid, idle and manual requests share a session-scoped launch guard. A stable
   launcher leases the selected client generation before entering replaceable

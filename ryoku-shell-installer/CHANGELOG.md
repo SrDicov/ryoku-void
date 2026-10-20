@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+<<<<<<< HEAD
 ### New
 - **Void Linux is now a supported host.** `install.sh` and the binary accept
   `xbps-install`, the new `zrepo` step trusts the signed z-repo binary
@@ -25,8 +26,154 @@
   `ryoku-track`, `ryoku recovery` and the issue link point at
   `SrDicov/ryoku-void`, and the CLI's channel tracking accepts a checkout
   whose origin is the fork.
+=======
+### Added
+- **The script installer now uses the ISO install catalogue.** It offers the
+  file manager, Rashin, Ryoku apps, required edition components, and the
+  optional CachyOS layer on plain Arch. Unattended runs can make the same
+  choices with flags or environment variables, and omitted packages stay
+  omitted on later updates.
+- **The browser step accepts None.** A machine that brings its own browser
+  installs none of the three, and the default-browser step leaves the desktop
+  role unset instead of pointing it at an absent package.
+- **Fedora is now a packaged shell-installer lane.** Mutable Fedora Workstation
+  and Server systems use dnf5 or dnf, verify and import the Ryoku release key,
+  configure the signed stable, testing or frozen RPM repository plus
+  package-restricted dependency COPRs, and install either compositor variant.
+  The shared session, configuration, doctor and verification steps finish the
+  install; rpm-ostree systems are refused and Fedora stays on nouveau this
+  release.
+- **Fedora installs are release-gated and table-driven.** Before sudo or any
+  system change, the installer requires published repository metadata for the
+  running Fedora release and reports the published release list when refusing;
+  local `RYOKU_RPM_REPO` tests skip the gate. Fedora's edition table supplies
+  the Hyprland and niri choices and resolves desktop, development, hardware and
+  Hyprland package lanes through the same resolver Void uses. The plan explains
+  why Wayfire is unavailable. Workstation moves from GDM to SDDM, KDE keeps its
+  configured greeter, and `power-profiles-daemon` is enabled only when its unit
+  is installed so tuned-ppd remains active.
+- **Void btrfs conversions now describe snapshot rollback accurately.** Plans
+  use the same btrfs check as Arch, omit the old unsupported warning, and explain
+  that `ryoku update --system` keeps base updates inside the snapshot safety net.
+  The niri-only and unavailable-app notes remain.
+- **Void installs Ryoku from the signed XBPS repository.** The installer seeds
+  the repository key before its first sync, selects stable or testing from the
+  requested ref, resolves runtime and hardware package lanes without the build
+  set, and installs `ryoku-keyring`, `ryoku-desktop` and
+  `ryoku-desktop-niri`. It then materializes the packaged config and provisions
+  the runit and Turnstile session. The old source build and font-fetch path is
+  gone on Void.
+- **Void and Fedora package planning share one resolver.** The installer asks
+  `system/packages/resolve` for each edition's desktop, selected development
+  and detected hardware lanes plus the Hyprland lane when selected. Void adds
+  its session set and retains the exact XBPS package plan. Browser and
+  login-shell exclusions pass through the same resolver.
+- **Debian source installs include Ryoku's Bibata cursor family.** They fetch
+  the pinned upstream archive used by `ryoku-cursors`, verify its checksum and
+  install every left- and right-handed colour variant.
+- **Browser and login-shell choices now carry through the whole conversion.**
+  The plan starts with Firefox, Chromium and Zen plus Fish, Zsh and Bash
+  single-choice rows. The same picks work under `--yes` through `--browser`,
+  `--shell`, `RYOKU_BROWSER` and `RYOKU_LOGIN_SHELL`. The package transaction
+  keeps only the selected stacks, Zen forces its AUR build on Arch, the
+  account shell and browser defaults follow the picks, and omitted packages
+  are recorded so later health checks do not add them back.
+- **The installer now looks like Ryoku.** Every screen uses the warm dark
+  terminal palette, paper-and-ink contrast, quiet hairlines and one vermilion
+  力 seal instead of the old generic card and status-colour treatment. The plan
+  and live install views stay bounded at the 80 x 24 minimum terminal size.
+- **The unstable script installs onto the unstable channel.**
+  `RYOKU_SHELL_REF=unstable-dev` now points `[ryoku]` at the testing channel
+  its payload is built against (any other ref stays on stable) and records the
+  choice like `ryoku track` does. Before, it paired an unstable-dev payload
+  with stable packages and failed on packages only testing carries. A rerun
+  from the other ref moves the channel and redoes the payload and package
+  steps, so a stuck stable install can be finished on unstable.
+>>>>>>> origin/unstable-dev
 
 ### Fixed
+- **Uninstalling on Fedora stops trusting Ryoku's signing key.** Removing the
+  repository files now also deletes the key rpm imported, so the machine no
+  longer accepts packages signed by Ryoku. The key file itself leaves with the
+  `ryoku-keyring` package and is deleted by hand only on older installs.
+- **Rashin can be left out on Void and Fedora.** The Rashin row was locked on
+  there because the desktop package required it. It is a normal choice on
+  every edition now, and `--rashin=false` works everywhere.
+- **Carried keyboard settings now reach every compositor and the system
+  keymap.** The installer merges the salvaged layout, variant, and options into
+  the neutral desktop store before materialization, while keeping a later Hub
+  choice on repair runs, and puts the same layout on the console and the login
+  screen through `localectl` with the sudo it already holds. Left to the doctor,
+  that step went through polkit and stalled an unattended run on a password
+  prompt nothing could answer. The Hub, login screen, console, and boot prompt
+  now converge on the same setting.
+- **Fedora Server and spin installs bring up installed Bluetooth support.**
+  The session step enables `bluetooth.service` only when its unit is present
+  and not already enabled, and records how to disable it in the restore script.
+- **The shell installer identifies filtered Ryoku DNS.** A private, loopback,
+  or known sinkhole answer for `repo.ryoku.dev` gets a direct warning and a link
+  to the recovery steps instead of the generic unreachable-repository message.
+- **SDDM opens the compositor selected during installation.** When the plan
+  switches the display manager, the installer records the chosen Wayland
+  session in SDDM's state without dropping its remembered user or other
+  settings. The original state is included in the generated restore script.
+- **Arrow keys move through every plan row in GNOME Terminal and Ptyxis.** The
+  plan now reads key codes instead of the key's text form, so VTE's cursor
+  encodings walk every choice and toggle, and only a real Enter installs.
+  Fedora and Void offer only browsers their package tables can install, and
+  Fedora's plan never claims snapshot rollback.
+- **Unavailable edition choices fail before installation.** Browser,
+  login-shell and compositor flags now use the same manifest and package-table
+  availability as the interactive plan. Fedora and Void reject Zen with the
+  edition's package-table reason instead of accepting an un-installable plan;
+  `--yes` and existing-shell defaults pass through the same gate.
+- **Carried monitor layouts no longer leave a laptop panel dark without a
+  live alternative.** GNOME, KDE, Hyprland, niri and sway output settings keep
+  an internal panel disabled only when another enabled connector is currently
+  connected. Otherwise the installer carries the panel over as enabled, while
+  preserving intentional disabled outputs on desktop layouts.
+- **Release plans name experimental paths before installation.** Void and Fedora
+  plans show one experimental-edition notice, Wayfire is marked experimental
+  in the compositor choice, and payloads are fetched from the canonical
+  `ryoku-dev/ryoku` repository. The Void documentation now matches its packaged
+  Ryotunes, GlazePKG, controller, and shell extras.
+- **Debian source installs keep a complete checkout that `ryoku update` can
+  use.** They clone into `~/ryoku-arch` with full history and source paths,
+  refresh the requested ref in place on reruns, and leave deploy's recorded
+  checkout pointer valid. Packaged Arch and Void installs use a shallow sparse
+  payload cache.
+- **Void installs repair and verify the Turnstile session chain.** After the
+  packages install `ryoku-host`, the installer provisions the system and user
+  session, then removes nested D-Bus launch wrappers while backing them up for
+  `restore.sh`. Final verification reports each remaining Turnstile or
+  session-bus problem with its repair.
+- **Void installs enable required XBPS repositories before desktop packages.**
+  Repository packages from the shared Void plan now install in a first
+  transaction, then XBPS syncs again while installing the remaining packages,
+  so multilib and nonfree dependencies resolve on a stock Void system.
+- **Void installs now preserve system service logs.** The package plan includes
+  `socklog-void`, and runit enables both `socklog-unix` and `nanoklogd` so
+  service output reaches the system log.
+- **Keeping bash or zsh as the login shell now gets the Ryoku terminal.** Only
+  the Hub's shell picker wrote the rc line that loads Ryoku's shell config, so
+  an install that kept or chose bash or zsh opened bare terminals: no fastfetch
+  readout, no Ryoku prompt, no `~/.local/bin` on PATH. The login-shell step now
+  writes it through the same code (`ryoku-hub shell loaders`).
+- **Debian source installs no longer stop partway through the build.** The
+  build step now pulls Qt's private GUI headers (the Ryogami picker needs them)
+  and the GTK and WebKitGTK headers the Rashin app links against, and the
+  configs step no longer runs `ryoku materialize`, which only applies to a
+  packaged install; the source build already lays the config.
+- **NVIDIA conversion now defaults on when nouveau currently drives the card.**
+  The hardware script keeps nouveau available unless the proprietary module is
+  built successfully, then replaces it after reboot. Unsigned Secure Boot
+  installs remain held off.
+- **The install no longer hangs at 9/15 "Wiring the login session".** A
+  power-policy cutover left behind by the desktop package could keep holding
+  the lock screen's locks, and `install-qylock` then waited on them forever with
+  no output. The session step now stops those leftover guard units first.
+  `install.sh` also stopped ending every run, including successful ones, with
+  `work: unbound variable` and exit 1. Rebuilt the committed binary + checksum.
 - **Converting a box that runs oh-my-zsh-git no longer dies at the desktop
   transaction.** ryoku-oh-my-zsh provides and replaces both upstream
   frameworks, but a plain removal under --noconfirm refuses while an installed

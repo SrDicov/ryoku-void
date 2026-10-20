@@ -75,7 +75,7 @@ func (d *daemon) audio(sub string) string {
 	}
 	// The output cue fires for every up/down/mute, even when the sink change
 	// itself fails; input volume/mute have no verb here and stay silent.
-	playSound(soundVolumeChange)
+	d.playSound(soundVolumeChange)
 	if err := exec.Command("wpctl", argv...).Run(); err != nil {
 		return "err audio: " + err.Error()
 	}
@@ -148,6 +148,19 @@ func hubNav(section string) bool {
 	return exec.Command("qs", argv...).Run() == nil
 }
 
+// Retired Hub links now name their owning Stage Editor catalogue.
+func hubEditorSection(section string) string {
+	switch section {
+	case "desktop-scene", "stage":
+		return "depth"
+	case "desktop-scene-visualizer", "visualizer":
+		return "visualizer"
+	case "desktop-scene-widgets", "widgets":
+		return "widgets"
+	}
+	return ""
+}
+
 // hubAlive: a running Hub answers its nav ipc.
 func hubAlive() bool {
 	argv := append(hubSelect(), "ipc", "call", "nav", "section")
@@ -164,6 +177,10 @@ func (d *daemon) hubRaise() {
 func (d *daemon) hub(sub, section string) string {
 	switch sub {
 	case "open":
+		if editorSection := hubEditorSection(section); editorSection != "" {
+			go ipcCallN("shell", "desktop", "editSection", editorSection, "")
+			return "ok"
+		}
 		go func() {
 			if hubAlive() {
 				if section != "" {
@@ -182,7 +199,7 @@ func (d *daemon) hub(sub, section string) string {
 				return
 			}
 			if section != "" {
-				// the fresh instance answers ipc once its root loads; nudge the
+				// The fresh instance answers IPC once its root loads; nudge the
 				// section as soon as it does.
 				for range 40 {
 					time.Sleep(250 * time.Millisecond)

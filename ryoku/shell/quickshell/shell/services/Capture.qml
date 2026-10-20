@@ -5,22 +5,21 @@ import Quickshell
 import Quickshell.Io
 import Ryoku.Ui.Singletons
 
-// Quick-capture controller for the frame's capture card: pick a delay, a save
+// Quick-capture controller for the bar's capture popout: pick a delay, a save
 // target and a mode, take the shot and be done. With "Beautify after" on, the
 // saved shot then opens in ryoshot's beautify editor (RYOSHOT_OPEN) for polish
 // instead of ending at the file. The delay / save / beautify choices persist
-// (capture.json) so the card remembers them across sessions, shared across every
+// (capture.json) so the popout remembers them across sessions, shared across every
 // daemon that reads this singleton.
 //
-// Screen RECORDING is deliberately NOT owned here. The card's record zone drives
-// the existing Recorder singleton (gpu-screen-recorder with a wf-recorder
-// fallback, the record island, Studio, Discord, camera). The only recording
-// thing this file does is hand a picked target (monitor, window or region) to
-// Recorder.start.
+// Screen RECORDING is deliberately NOT owned here. The popout's record zone drives
+// the existing Recorder singleton (GPU Screen Recorder, the record island,
+// Discord, camera). The only recording thing this file does is hand a picked
+// target (monitor, window or region) to Recorder.start.
 //
 // Divergence: the capture backend shells out to grim + wl-copy rather than a
 // bespoke zwlr_screencopy_v1 client -- grim speaks exactly that protocol, and
-// Ryoku already shells out to wl-copy / wf-recorder for the same reasons.
+// Ryoku already shells out to wl-copy / gpu-screen-recorder for the same reasons.
 Singleton {
     id: root
 
@@ -103,15 +102,15 @@ Singleton {
     function commit(result) {
         root.selecting = "";
         if (root._purpose === "record") {
-            var rgx = Math.round(result.monX + result.x);
-            var rgy = Math.round(result.monY + result.y);
-            var geom = Math.round(result.w) + "x" + Math.round(result.h) + "+" + rgx + "+" + rgy;
-            // A monitor becomes -w <NAME> on the KMS backend and degrades to this
-            // rect on the portal backend, so it carries both; a window is captured
-            // by its area, so window and region both record the plain --region rect.
+            // A monitor records whole by name. A window or region travels in
+            // layout (logical) coordinates, the space GSR's -region reads: GSR
+            // maps the box onto the output's physical pixels itself, so a box
+            // scaled up here first records an area the output's scale too big,
+            // tiled where it runs past the screen.
             var args = result.mode === "monitor"
-                ? ["--monitor", result.output, "--geometry", geom]
-                : ["--region", "--geometry", geom];
+                ? ["--monitor", result.output]
+                : ["--region", "--geometry", Math.round(result.w) + "x" + Math.round(result.h)
+                    + "+" + Math.round(result.monX + result.x) + "+" + Math.round(result.monY + result.y)];
             // The delay counts from the selection, exactly as it does for a shot:
             // you frame the target first, then get the beat to clear the frame.
             Recorder.startAfter(args.concat(root._recordAudio), root.delay);

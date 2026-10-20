@@ -9,8 +9,105 @@
   modeline (`cvt`, from the already-present libxcvt) and use that, which Hyprland
   accepts as a forced timing; advertised modes pass through unchanged. Covered by
   `tests/monitor-custom-mode.sh`.
+- `power/ryoku-power-cutover`: **a shell-owner restart covers the desktop.**
+  `restart_shell_owner` raises the reload cover before restarting
+  `ryoku-shell.service`, so a session-start recovery, a compositor switch, or
+  a power-policy cutover never leaves the screen bare while the fresh shell
+  cold-loads. A live cover from the login chain makes the call a no-op, and a
+  headless one exits at once.
 
 ### Fixed
+- `gpu/ryoku-gpu-lib32`: **installs on every edition, and as root.** It
+  asks `ryoku-host pkg status` which of the wanted 32-bit driver packages the
+  edition provides and installs only those, turning on Void's multilib
+  repository first. Run as root it no longer dies with
+  `line 51: : command not found`, which an empty privilege prefix expanded to.
+- `power/ryoku-power-cutover`: **launcher apps inherit the late X display at
+  login.** The first fix preserved `DISPLAY` only when Xwayland was already in
+  the session scope as the environment bind ran. The bind now waits a bounded
+  interval for the compositor's X server before it starts the shell services,
+  so Zoom, Nuvio, Java and other X11 clients open from the launcher without a
+  second shell restart. Covered by `test_late_session_display_bind` in
+  `tests/power-cutover.sh`.
+- **`ryoku-wifi-backend` keeps iwd supervised on a runit host.** Switching the
+  backend on Void wrote the drop-in and restarted NetworkManager, which cannot
+  D-Bus-activate iwd there; the switch now maintains
+  `/var/lib/ryoku/wifi-iwd.enabled`, reconciles the service manifest (its
+  `wifi-iwd` row links or unlinks `/etc/sv/iwd`) and raises iwd when it is the
+  backend. On systemd nothing changes: NetworkManager activates iwd itself
+  (`system/hardware/network/ryoku-wifi-backend`, `tests/void-wifi-backend.sh`).
+- `power/ryoku-clamshell`: **Wayfire lid close now locks, suspends, or enters
+  docked clamshell mode instead of being swallowed by the lid inhibitor.**
+  Wayfire 0.11 receives switch devices internally but exposes no switch binding
+  or IPC event, so its provider declares a system lid-edge source. The neutral
+  clamshell owner watches ACPI state, falls back to UPower, and routes each
+  transition through the existing cancellable policy and panel handoff. Other
+  providers keep their native switch callbacks and never start the watcher.
+  Covered by `tests/clamshell-policy.sh`.
+- **The lockscreen cutover waiter can no longer restart forever.** It ran the
+  staged helper under /run, which the cutover retires once it finishes, so a
+  waiter left behind failed every two seconds until the next reboot. It now
+  runs the installed helper, a new waiter replaces an old one, and login
+  clears any stale waiter (`power/ryoku-power-cutover`).
+- `gpu/ryoku-gpu`: **display-only DRM cards are no longer treated as render
+  GPUs.** Ranking now requires a `device/drm/renderD*` node, so KMS-only
+  devices such as the Touch Bar's `appletbdrm` never enter `AQ_DRM_DEVICES`.
+  Covered by `tests/gpu-pin-policy.sh`.
+- `power/ryoku-power-cutover`: **the session bind no longer strips the live X
+  display.** Xwayland starts lazily with the first X client, so the compositor
+  child whose environment the bind snapshots often predates it: the file then
+  carries WAYLAND_DISPLAY but no DISPLAY, and the manager bind, which clears
+  the key before replaying the file, removed the DISPLAY the compositor
+  bootstrap had already pushed. Every X11-only app the launcher spawned died
+  at startup (Steam: "XOpenDisplay failed") until the next full relogin, and
+  whether a boot was affected depended on which process won the snapshot
+  race. The snapshot writer now borrows a missing DISPLAY from the session's
+  own X server process (matched by scope cgroup, session id, and the X server
+  binary itself, never a client, whose DISPLAY could name another machine);
+  with no X server in the session the file is written exactly as before.
+- `tpm/60-ryoku-tpm-nvpcr.rules`: **four TPM units no longer fail on every
+  boot.** systemd 262 sets up NvPCRs only from a PCR-signed UKI's
+  `tpm2-pcr-public-key.pem`, which Ryoku does not build, so
+  `systemd-tpm2-setup-early`, `systemd-pcrproduct` and each
+  `systemd-pcrlogin@` failed with "No such file or directory". The rule marks
+  such a TPM `TPM2_BROKEN_NVPCR`, systemd's own switch, and they skip cleanly;
+  a box that carries the key keeps its NvPCRs. Shipped in `ryoku-desktop` and
+  laid by `deploy.sh`.
+- `power/ryoku-clamshell`: **a refused lid suspend now says why in the
+  journal.** The close path runs detached from the compositor, so the
+  rejection reason `ryoku-shell` printed died with the process and a laptop
+  that locked but never suspended gave support nothing to read. The reason is
+  captured and journalled once per distinct message (`logger -t
+  ryoku-clamshell`), so `journalctl -t ryoku-clamshell` names the suspect
+  while a retry loop cannot flood the journal. Covered by
+  `tests/clamshell-policy.sh`.
+- `power/ryoku-power-cutover`: **a failed cutover never strands its sleep
+  guard.** The session cutover and the login startup take a durable sleep
+  inhibitor before they stop the lid and idle owners, and only the success
+  paths released it. Any failure after that point (a wallpaper daemon in
+  start-limit-hit, a session-bind that cannot resolve the compositor
+  environment) exited with the block still live, and logind denied every
+  later suspend, lid-close included, with "Operation denied due to active
+  block inhibitor" until logout or a reboot (#282, #285). Both entry points
+  now release the guard on any non-zero exit, and the wallpaper restart is
+  demoted to a warning: it is cosmetic, and it used to abort a cutover that
+  had already succeeded. A run whose session is closing keeps the guard,
+  because that session's own user manager takes the inhibitor down with it,
+  and releasing early would open the suspend window the guard exists to
+  close (`tests/power-cutover.sh` covers the leak, the release, and the
+  closing-session hold). Systemd liveness probes and shell-owner restart
+  failures now propagate explicitly through Bash 5.2 exit handling.
+- `power/ryoku-power-cutover`: **a uwsm-launched compositor is found.** uwsm
+  deliberately keeps transient session variables out of the user manager, so
+  its Hyprland runs as a session service carrying no `XDG_SESSION_ID` at all,
+  and the login1 scope holds only sddm-helper and the launcher. Neither the
+  scope scan nor the user scan could resolve the compositor environment, so
+  every package cutover on such a box failed at session-bind and left the
+  shell stopped (#282). The user scan now accepts a Wayland process with no
+  session id when its desktop name identifies this compositor *and* this user
+  holds exactly one open graphical Ryoku session, which makes the attribution
+  unambiguous; with two sessions open it still refuses, and an exact match
+  found later still outranks it.
 - `power/ryoku-power-cutover`: **a killed generation guard releases its
   locks.** The hold keeps the launch and generation flocks exclusive while a
   cutover swaps lockscreen generations, and its keep-alive coprocess inherited

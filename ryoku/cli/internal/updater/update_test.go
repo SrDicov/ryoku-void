@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"github.com/godbus/dbus/v5"
@@ -8,6 +9,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"ryoku-cli/internal/host"
 	wm "ryoku-wm"
 	"strings"
 	"testing"
@@ -46,12 +49,79 @@ func TestWantedSnapperHelpers(t *testing.T) {
 	if got := wantedSnapperHelpers(snapHelpers{rootBtrfs: true}); got != nil {
 		t.Fatalf("snapper absent must offer nothing (a separate doctor warn), got %v", got)
 	}
+
+	voidReady := snapHelpers{
+		manager:           host.XBPS,
+		rootBtrfs:         true,
+		snapper:           true,
+		snapperConfigured: true,
+		limine:            true,
+	}
+	if got := wantedSnapperHelpers(voidReady); len(got) != 1 || got[0] != "limine-snapper-sync" {
+		t.Fatalf("Void helper offer = %v, want [limine-snapper-sync]", got)
+	}
+	voidReady.snapperConfigured = false
+	if got := wantedSnapperHelpers(voidReady); got != nil {
+		t.Fatalf("Void without a configured root store offered helpers: %v", got)
+	}
+}
+
+func TestResetFailedUserUnitsSkipsUnloadedUnits(t *testing.T) {
+	t.Setenv("RYOKU_HOST_INIT", "systemd")
+	oldService := service
+	var reset []string
+	service = func(args ...string) int {
+		if len(args) >= 3 && args[1] == "is-failed" {
+			switch args[2] {
+			case "ryoku-idle.service":
+				return host.ExitAbsent
+			case "ryoku-clamshell.service":
+				return host.ExitFalse
+			case "failed.service":
+				return host.ExitOK
+			}
+		}
+		if len(args) >= 2 && args[1] == "reset-failed" {
+			reset = append([]string(nil), args[2:]...)
+		}
+		return host.ExitOK
+	}
+	t.Cleanup(func() { service = oldService })
+
+	resetFailedUserUnits("ryoku-idle.service", "ryoku-clamshell.service", "failed.service")
+	if !reflect.DeepEqual(reset, []string{"failed.service"}) {
+		t.Fatalf("reset-failed units = %v, want only the loaded failed unit", reset)
+	}
+}
+
+func TestVoidSnapshotHelperUsesPackageAndServiceSeams(t *testing.T) {
+	t.Setenv("RYOKU_HOST_PKGMGR", "xbps")
+	var calls [][]string
+	oldPrivileged := privileged
+	privileged = func(args ...string) error {
+		calls = append(calls, append([]string(nil), args...))
+		return nil
+	}
+	t.Cleanup(func() { privileged = oldPrivileged })
+
+	if err := installSnapshotHelper("limine-snapper-sync"); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{
+		{"ryoku-host", "pkg", "install", "limine-snapper-sync"},
+		{"ryoku-host", "svc", "--system", "enable", "--now", "limine-snapper-sync.service"},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
 }
 
 // publishPrompt/awaitAnswer = the Hub consent back-channel. publish clears
 // stale answers, run-state carries the prompt, awaitAnswer reads + consumes.
 func TestPromptAnswerRoundTrip(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	progress.begin(pkgSteps) // a prompt is only ever raised inside a run
+	t.Cleanup(progress.idle)
 
 	// stale answer from a previous prompt must not satisfy this one.
 	if err := os.WriteFile(answerPath(), []byte("Install"), 0o644); err != nil {
@@ -151,6 +221,23 @@ func TestPackagedStatusUpToDateOfflineEmptyRecent(t *testing.T) {
 	}
 }
 
+func TestFilteredDNSUpdateError(t *testing.T) {
+	oldCheck := updaterFilteredRyokuDNS
+	t.Cleanup(func() { updaterFilteredRyokuDNS = oldCheck })
+
+	updaterFilteredRyokuDNS = func(repository string) bool {
+		return repository == "https://repo.ryoku.dev/stable/$arch"
+	}
+	err := filteredDNSUpdateError("https://repo.ryoku.dev/stable/$arch")
+	if err == nil || !strings.Contains(err.Error(), "DNS for ryoku.dev is being filtered") ||
+		!strings.Contains(err.Error(), "docs/updates.md#filtered-dns") {
+		t.Fatalf("filtered DNS error = %v", err)
+	}
+	if err := filteredDNSUpdateError("https://mirror.example.org/ryoku/$arch"); err != nil {
+		t.Fatalf("custom mirror error = %v", err)
+	}
+}
+
 // The Ryoku lane must never be a sysupgrade: the kernel and the base come from
 // the distribution the box was installed from, on the user's schedule. It must
 // also --overwrite the Ryoku system paths the ISO installer and deploy.sh seed
@@ -160,6 +247,7 @@ func TestPackagedStatusUpToDateOfflineEmptyRecent(t *testing.T) {
 // file conflict otherwise aborts the whole transaction and blocks every user
 // update, so pin them here.
 func TestRyokuInstallArgsStayInTheRyokuLane(t *testing.T) {
+	t.Setenv("RYOKU_HOST_PKGMGR", "pacman")
 	set := []string{"ryoku/ryoku-desktop", "ryoku/ryogami"}
 	args := ryokuInstallArgs(set)
 	joined := strings.Join(args, " ")
@@ -180,12 +268,11 @@ func TestRyokuInstallArgsStayInTheRyokuLane(t *testing.T) {
 	}
 	// The database refresh is its own step, and a channel move forces it: pacman
 	// skips a db that is not newer than its cache, and a frozen release is older
-	// than the channel the box just left.
-	if got := strings.Join(refreshDBArgs(false), " "); !strings.Contains(got, "pacman -Sy") {
-		t.Errorf("refreshDBArgs = %q, want a -Sy refresh", got)
+	if got := strings.Join(refreshDBArgs(false), " "); got != "sudo ryoku-host repo sync" {
+		t.Errorf("refreshDBArgs = %q, want host repository sync", got)
 	}
-	if got := strings.Join(refreshDBArgs(true), " "); !strings.Contains(got, "pacman -Syy") {
-		t.Errorf("refreshDBArgs(force) = %q, want -Syy so a frozen release's db is refetched", got)
+	if got := strings.Join(refreshDBArgs(true), " "); got != "sudo ryoku-host repo sync --force" {
+		t.Errorf("refreshDBArgs(force) = %q, want forced host repository sync", got)
 	}
 
 	var glob string
@@ -200,14 +287,24 @@ func TestRyokuInstallArgsStayInTheRyokuLane(t *testing.T) {
 	for _, p := range []string{
 		"/usr/bin/ryoku-dns",
 		"/usr/bin/ryoku-wifi-powersave",
+		"/usr/bin/ryoku-hub",
 		"/usr/share/polkit-1/rules.d/50-ryoku-dns.rules",
 		"/usr/share/polkit-1/rules.d/49-ryoku-wifi-powersave.rules",
 		"/usr/share/plymouth/themes/ryoku/bullet.png",
 		"/usr/share/plymouth/themes/ryoku/logo.png",
 		"/usr/lib/systemd/system/ryoku-network-kill-guard.service",
+		"/usr/lib/wayfire/libryoku-decor.so",
 		"/usr/lib/initcpio/install/ryoku-gpu-trim",
 		"/usr/share/ryoku/boot/default.conf",
+		"/usr/share/ryoku/lockscreen/ryoku-greeter",
+		"/usr/share/ryoku/config/wayfire/wayfire.ini",
+		"/usr/share/ryoku/config/xdg-desktop-portal/wayfire-portals.conf",
+		"/usr/share/wayfire/metadata/ryoku-decor.xml",
 		"/etc/systemd/logind.conf.d/10-ryoku-lid.conf",
+		"/etc/boot/hooks/post.d/45-ryoku-windows",
+		"/etc/modules-load.d/99-ryoku-uinput.conf",
+		"/usr/lib/udev/rules.d/90-ryoku-backlight.rules",
+		"/usr/local/share/applications/mimeapps.list",
 	} {
 		covered := false
 		for _, g := range strings.Split(glob, ",") {
@@ -226,6 +323,118 @@ func TestRyokuInstallArgsStayInTheRyokuLane(t *testing.T) {
 		t.Errorf("systemUpgradeArgs = %q, want the full -Syu it exists for", got)
 	} else if !strings.Contains(got, "RYOKU_MANAGED_UPDATE=1") {
 		t.Errorf("systemUpgradeArgs = %q, want first-rollout scheduling owned by stage2", got)
+	}
+}
+
+func TestVoidUpdateTransactionsCarryManagedMarker(t *testing.T) {
+	t.Setenv("RYOKU_HOST_PKGMGR", "xbps")
+	set := []string{"ryoku-desktop", "ryogami"}
+	if got := strings.Join(ryokuInstallArgs(set), " "); got != "sudo env RYOKU_MANAGED_UPDATE=1 xbps-install -Syu ryoku-desktop ryogami" {
+		t.Fatalf("Ryoku transaction = %q", got)
+	}
+	if got := strings.Join(systemUpgradeArgs(), " "); got != "sudo env RYOKU_MANAGED_UPDATE=1 xbps-install -Syu" {
+		t.Fatalf("system transaction = %q", got)
+	}
+	if got := strings.Join(ryokuMoveArgs(set), " "); got != "env RYOKU_MANAGED_UPDATE=1 xbps-install -Sfy ryoku-desktop ryogami" {
+		t.Fatalf("channel move = %q", got)
+	}
+}
+
+func TestPrimeSudoSkipsValidationWhenNonInteractiveSudoWorks(t *testing.T) {
+	t.Setenv("RYOKU_UPDATE_UI", "")
+	oldRun, oldTTY := primeSudoRun, primeSudoTTY
+	defer func() {
+		primeSudoRun, primeSudoTTY = oldRun, oldTTY
+	}()
+	primeSudoTTY = func() bool { return true }
+	var calls [][]string
+	primeSudoRun = func(name string, args ...string) error {
+		calls = append(calls, append([]string{name}, args...))
+		return nil
+	}
+
+	primeSudo()
+
+	want := [][]string{{"sudo", "-n", "true"}}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("sudo calls = %v, want %v", calls, want)
+	}
+}
+
+func TestPrimeSudoPromptsAfterNonInteractiveSudoFails(t *testing.T) {
+	t.Setenv("RYOKU_UPDATE_UI", "")
+	oldRun, oldTTY := primeSudoRun, primeSudoTTY
+	defer func() {
+		primeSudoRun, primeSudoTTY = oldRun, oldTTY
+	}()
+	primeSudoTTY = func() bool { return true }
+	var calls [][]string
+	primeSudoRun = func(name string, args ...string) error {
+		calls = append(calls, append([]string{name}, args...))
+		if len(args) > 0 && args[0] == "-n" {
+			return errors.New("password required")
+		}
+		return nil
+	}
+
+	primeSudo()
+
+	want := [][]string{{"sudo", "-n", "true"}, {"sudo", "-v"}}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("sudo calls = %v, want %v", calls, want)
+	}
+}
+
+func TestFedoraUpdateTransactionsUseExactDNFTargets(t *testing.T) {
+	t.Setenv("RYOKU_HOST_PKGMGR", "dnf")
+	bin := t.TempDir()
+	writeExec(t, filepath.Join(bin, "dnf5"), "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", bin)
+
+	set := []string{"ryoku-desktop-0:1.2.3-1.fc44", "ryogami-0:1.2.3-1.fc44"}
+	if got := strings.Join(ryokuInstallArgs(set), " "); got != "sudo env RYOKU_MANAGED_UPDATE=1 dnf5 distro-sync -y ryoku-desktop-0:1.2.3-1.fc44 ryogami-0:1.2.3-1.fc44" {
+		t.Fatalf("Ryoku transaction = %q", got)
+	}
+	if got := strings.Join(systemUpgradeArgs(), " "); got != "sudo env RYOKU_MANAGED_UPDATE=1 dnf5 upgrade -y --refresh" {
+		t.Fatalf("system transaction = %q", got)
+	}
+	if got := strings.Join(ryokuMoveArgs(set), " "); got != "env RYOKU_MANAGED_UPDATE=1 dnf5 distro-sync -y ryoku-desktop-0:1.2.3-1.fc44 ryogami-0:1.2.3-1.fc44" {
+		t.Fatalf("channel move = %q", got)
+	}
+}
+
+func TestDNFPendingUpdatesAcceptsExit100(t *testing.T) {
+	t.Setenv("RYOKU_HOST_PKGMGR", "dnf")
+	bin := t.TempDir()
+	writeExec(t, filepath.Join(bin, "dnf5"), "#!/bin/sh\n[ \"$*\" = 'check-upgrade -y' ] || exit 2\nprintf 'Last metadata expiration check: 0:00:02 ago\\nryoku-desktop.x86_64 0:1.2.4-1.fc44 ryoku\\nkernel.x86_64 0:6.17.0-1.fc44 updates\\n'\nexit 100\n")
+	t.Setenv("PATH", bin)
+
+	out, code, err := runDNFCheckUpdate(context.Background())
+	if err != nil || code != 100 || !strings.Contains(out, "kernel.x86_64") {
+		t.Fatalf("check-update = code %d, err %v, output %q", code, err, out)
+	}
+
+	oldCheck, oldVersions := runDNFCheckUpdate, dnfInstalledVersions
+	dnfInstalledVersions = func() map[string]string {
+		return map[string]string{
+			"ryoku-desktop": "0:1.2.3-1.fc44",
+			"kernel":        "0:6.16.0-1.fc44",
+		}
+	}
+	t.Cleanup(func() {
+		runDNFCheckUpdate, dnfInstalledVersions = oldCheck, oldVersions
+	})
+	got := dnfPendingUpdates(map[string]bool{"ryoku-desktop": true})
+	want := []updateItem{{Name: "kernel", Old: "0:6.16.0-1.fc44", New: "0:6.17.0-1.fc44"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("pending = %#v, want %#v", got, want)
+	}
+
+	runDNFCheckUpdate = func(context.Context) (string, int, error) {
+		return "", 1, errors.New("metadata unavailable")
+	}
+	if got := dnfPendingUpdates(nil); got != nil {
+		t.Fatalf("failed check-update returned %#v, want nil", got)
 	}
 }
 
@@ -271,6 +480,7 @@ func TestLogin1GraphicalUserProperties(t *testing.T) {
 		{"wayland greeter", properties("wayland", "greeter", "Hyprland"), false},
 		{"wayland lock screen", properties("wayland", "lock-screen", "Hyprland"), false},
 		{"other desktop", properties("wayland", "user", "GNOME"), false},
+		{"unnamed desktop", properties("wayland", "user", ""), false},
 		{"missing class", map[string]dbus.Variant{
 			"Type": dbus.MakeVariant("wayland"), "Desktop": dbus.MakeVariant("Hyprland"),
 		}, false},
@@ -280,6 +490,97 @@ func TestLogin1GraphicalUserProperties(t *testing.T) {
 				t.Fatalf("login1GraphicalUserProperties() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestLogin1LocalGraphicalUserProperties(t *testing.T) {
+	properties := func(sessionType, sessionClass string, remote bool) map[string]dbus.Variant {
+		return map[string]dbus.Variant{
+			"Type":   dbus.MakeVariant(sessionType),
+			"Class":  dbus.MakeVariant(sessionClass),
+			"Remote": dbus.MakeVariant(remote),
+		}
+	}
+	for _, tc := range []struct {
+		name       string
+		properties map[string]dbus.Variant
+		want       bool
+	}{
+		{"local wayland user", properties("wayland", "user", false), true},
+		{"local x11 early user", properties("x11", "user-early", false), true},
+		{"remote wayland user", properties("wayland", "user", true), false},
+		{"local tty user", properties("tty", "user", false), false},
+		{"local wayland greeter", properties("wayland", "greeter", false), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := login1LocalGraphicalUserProperties(tc.properties); got != tc.want {
+				t.Fatalf("login1LocalGraphicalUserProperties() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNeedsUpdateSleepGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		manager          host.PackageManager
+		init             host.InitSystem
+		graphicalPresent bool
+		localPresent     bool
+		want             bool
+	}{
+		{"runit SSH only", host.XBPS, host.Runit, false, false, false},
+		{"runit unnamed local desktop", host.XBPS, host.Runit, false, true, true},
+		{"runit known desktop", host.XBPS, host.Runit, true, true, true},
+		{"Fedora SSH only", host.DNF, host.Systemd, false, false, false},
+		{"Fedora local desktop", host.DNF, host.Systemd, false, true, true},
+		{"Arch SSH only", host.Pacman, host.Systemd, false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := needsUpdateSleepGuard(
+				tc.manager, tc.init, tc.graphicalPresent, tc.localPresent,
+			); got != tc.want {
+				t.Fatalf("needsUpdateSleepGuard() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunitUpdateSleepGuardSkippedWithoutGraphicalSession(t *testing.T) {
+	t.Setenv("RYOKU_HOST_INIT", "runit")
+	t.Setenv("PATH", t.TempDir())
+
+	guard, err := acquireUpdateSleepGuard(false)
+	if err != nil {
+		t.Fatalf("SSH-only guard acquisition failed: %v", err)
+	}
+	if guard == nil || guard.conn != nil || guard.transient {
+		t.Fatalf("SSH-only guard = %#v, want inert guard", guard)
+	}
+	if err := guard.Release(); err != nil {
+		t.Fatalf("release inert guard: %v", err)
+	}
+	t.Setenv("RYOKU_HOST_INIT", "systemd")
+	if _, err := acquireUpdateSleepGuard(false); err == nil ||
+		!strings.Contains(err.Error(), "systemctl is required") {
+		t.Fatalf("systemd SSH guard error = %v, want missing systemctl", err)
+	}
+}
+
+func TestDNFUpdateSleepGuardSkippedWithoutGraphicalSession(t *testing.T) {
+	t.Setenv("RYOKU_HOST_PKGMGR", "dnf")
+	t.Setenv("RYOKU_HOST_INIT", "systemd")
+	t.Setenv("PATH", t.TempDir())
+
+	guard, err := acquireUpdateSleepGuard(false)
+	if err != nil {
+		t.Fatalf("SSH-only Fedora guard acquisition failed: %v", err)
+	}
+	if guard == nil || guard.conn != nil || guard.transient {
+		t.Fatalf("SSH-only Fedora guard = %#v, want inert guard", guard)
+	}
+	if err := guard.Release(); err != nil {
+		t.Fatalf("release inert Fedora guard: %v", err)
 	}
 }
 
@@ -335,6 +636,44 @@ func TestPackagePowerCutoverRetriesIncompleteAdoption(t *testing.T) {
 	}
 }
 
+func TestPackagePowerCutoverRecoveryUsesInstalledHelper(t *testing.T) {
+	bin := t.TempDir()
+	systemctl := filepath.Join(bin, "systemctl")
+	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nexit 3\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(bin, "ryoku-power-cutover")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("RYOKU_HOST_INIT", "systemd")
+
+	oldMarker := packagePowerCutoverMarker
+	oldHelper := packagePowerCutoverHelper
+	oldSudo := sudoPackagePowerCutover
+	t.Cleanup(func() {
+		packagePowerCutoverMarker = oldMarker
+		packagePowerCutoverHelper = oldHelper
+		sudoPackagePowerCutover = oldSudo
+	})
+	packagePowerCutoverMarker = filepath.Join(bin, "missing-marker")
+	packagePowerCutoverHelper = helper
+
+	var got []string
+	sudoPackagePowerCutover = func(args ...string) error {
+		got = append([]string(nil), args...)
+		return nil
+	}
+	if err := ensurePackagePowerCutover(); err != nil {
+		t.Fatalf("ensure package power cutover: %v", err)
+	}
+	want := []string{"env", "RYOKU_CUTOVER_STAGED=1", helper, "package"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("package power cutover recovery argv = %q, want %q", got, want)
+	}
+}
+
 func TestConfigReloadResultAcceptsProviderWithoutReload(t *testing.T) {
 	if err := configReloadResult(wm.ErrUnsupported); err != nil {
 		t.Fatalf("unsupported reload should defer to provider file watching: %v", err)
@@ -342,6 +681,63 @@ func TestConfigReloadResultAcceptsProviderWithoutReload(t *testing.T) {
 	providerErr := errors.New("provider unavailable")
 	if err := configReloadResult(providerErr); !errors.Is(err, providerErr) {
 		t.Fatalf("live provider error was suppressed: %v", err)
+	}
+}
+
+// A drifted /var/lib/ryoku mode (0700) hides the cutover marker from the
+// update's unprivileged stat. That must fall back to asking root, never
+// abort the update with "inspect package power cutover state: permission
+// denied".
+func TestCutoverMarkerFallsBackToRootWhenUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions; EACCES is not reproducible")
+	}
+	closed := t.TempDir()
+	if err := os.Chmod(closed, 0o000); err != nil {
+		t.Fatalf("chmod 000: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(closed, 0o700) })
+	marker := filepath.Join(closed, "power-cutover-hook-active")
+
+	oldMarker, oldProbe := packagePowerCutoverMarker, cutoverMarkerExistsAsRoot
+	t.Cleanup(func() { packagePowerCutoverMarker, cutoverMarkerExistsAsRoot = oldMarker, oldProbe })
+	packagePowerCutoverMarker = marker
+
+	probed := 0
+	cutoverMarkerExistsAsRoot = func(path string) bool {
+		probed++
+		if path != marker {
+			t.Errorf("root probe asked for %q, want %q", path, marker)
+		}
+		return true
+	}
+	if !packageCutoverMarkerPresent() {
+		t.Fatal("EACCES on the marker's parent must defer to the root probe")
+	}
+	if probed != 1 {
+		t.Fatalf("root probe ran %d times, want 1", probed)
+	}
+
+	// A box that cannot ask root (no cached credential: the stub returns
+	// false) reads as absent, erring toward re-adoption, not a hard failure.
+	cutoverMarkerExistsAsRoot = func(string) bool { return false }
+	if packageCutoverMarkerPresent() {
+		t.Fatal("a failed root probe must read as absent")
+	}
+
+	// ENOENT must not wake the root probe at all.
+	missing := t.TempDir()
+	packagePowerCutoverMarker = filepath.Join(missing, "power-cutover-hook-active")
+	probed = 0
+	cutoverMarkerExistsAsRoot = func(string) bool {
+		probed++
+		return true
+	}
+	if packageCutoverMarkerPresent() {
+		t.Fatal("a genuinely absent marker is absent")
+	}
+	if probed != 0 {
+		t.Fatalf("ENOENT woke the root probe %d times, want 0", probed)
 	}
 }
 
@@ -381,5 +777,25 @@ func TestDropSplitMetasNotServed(t *testing.T) {
 	removed = nil
 	if got := dropSplitMetasNotServed(map[string]bool{"ryoku-desktop-hyprland": true}); len(got) != 0 || len(removed) != 0 {
 		t.Fatalf("a served meta must stay, got %v removed %v", got, removed)
+	}
+}
+
+// The doctor an update runs is the CLI that update just moved: the home build
+// deploy.sh laid down on a checkout, never a home build on a packaged box.
+func TestDoctorBinFollowsWhatTheUpdateMoved(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	built := filepath.Join(home, ".local", "bin", "ryoku")
+	if err := os.MkdirAll(filepath.Dir(built), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(built, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := doctorBin(true); got != built {
+		t.Errorf("checkout: doctorBin = %q, want the deployed %q", got, built)
+	}
+	if got := doctorBin(false); got == built {
+		t.Errorf("packaged: doctorBin ran the stale home build %q", got)
 	}
 }

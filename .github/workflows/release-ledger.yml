@@ -1,10 +1,9 @@
 name: Release Ledger
 
-# Rebuilds releases/index.json (the release ledger the Hub, `ryoku rollback`
-# and the site read) from the release directories the bucket holds, with the
-# same script the publish runs after a release lands (bin/ryoku-release-ledger).
-# Dispatch it when the ledger is missing or wrong; it is derived, so a rebuild
-# is always safe.
+# Rebuilds the stable and testing ledgers for Arch, Void, and every supported
+# Fedora release from the frozen repository directories the bucket holds, with
+# the same script each publish runs after a repository lands. Dispatch it when
+# any ledger is missing or wrong; all ledgers are derived, so a rebuild is safe.
 
 on:
   workflow_dispatch:
@@ -14,7 +13,7 @@ permissions:
 
 jobs:
   ledger:
-    name: Rebuild releases/index.json
+    name: Rebuild release ledgers
     runs-on: ubuntu-latest
     timeout-minutes: 10
     container:
@@ -34,16 +33,44 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
         run: ./bin/ryoku-r2-config
-      - name: Rebuild the ledger
+      - name: Rebuild all ledgers
         env:
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          REMOTE: Ryoku:${{ secrets.R2_BUCKET }}
         run: |
           set -euo pipefail
-          ./bin/ryoku-release-ledger "Ryoku:$R2_BUCKET" | tee "$RUNNER_TEMP/index.json"
+          ledgers=()
+          rebuild() {
+            local edition=$1 channel=$2 title=$3 file=$4
+            ./bin/ryoku-release-ledger "$REMOTE" "$edition" "$channel" | tee "$file"
+            ledgers+=("$title:$file")
+          }
+
+          rebuild arch stable "Arch stable" "$RUNNER_TEMP/index-arch-stable.json"
+          rebuild arch testing "Arch testing" "$RUNNER_TEMP/index-arch-testing.json"
+          rebuild void stable "Void stable" "$RUNNER_TEMP/index-void-stable.json"
+          rebuild void testing "Void testing" "$RUNNER_TEMP/index-void-testing.json"
+
+          while IFS= read -r fedora_release || [[ -n $fedora_release ]]; do
+            [[ -n $fedora_release && $fedora_release != \#* ]] || continue
+            [[ $fedora_release =~ ^[0-9]+$ ]] || {
+              echo "::error::Invalid Fedora release in fedora/releases: $fedora_release"
+              exit 1
+            }
+            rebuild "fedora/$fedora_release" stable "Fedora $fedora_release stable" \
+              "$RUNNER_TEMP/index-fedora-$fedora_release-stable.json"
+            rebuild "fedora/$fedora_release" testing "Fedora $fedora_release testing" \
+              "$RUNNER_TEMP/index-fedora-$fedora_release-testing.json"
+          done < fedora/releases
+
           {
-            echo "### Release ledger"
-            echo
-            echo '```json'
-            cat "$RUNNER_TEMP/index.json"
-            echo '```'
+            for ledger in "${ledgers[@]}"; do
+              title=${ledger%%:*}
+              file=${ledger#*:}
+              echo "### $title release ledger"
+              echo
+              echo '```json'
+              cat "$file"
+              echo '```'
+              echo
+            done
           } >> "$GITHUB_STEP_SUMMARY"

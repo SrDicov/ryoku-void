@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# ryoku-ci-gate: wait for every required GitHub check run on a commit.
+#
+# A GitHub Actions check is advisory when its job name or workflow name is in
+# the advisory set below. Checks from other GitHub Apps are advisory. Every new
+# GitHub Actions workflow gates by default until it is deliberately exempted.
+#
+# usage: ryoku-ci-gate <sha> [--timeout-min N] [--grace-sec N] [--json]
+# exit: 0 passed, 1 failed, 2 timed out, 3 invalid usage
+# needs: gh, jq, GITHUB_REPOSITORY, GH_TOKEN
+set -euo pipefail
+
+advisory_workflows=(
+  "Commit Notifications"
+  "Discord Notifications"
+  "Release Notes"
+  "Unstable Version Bump"
+  "Project Auto Add"
+  "Project Triage"
+  "Project Roadmap Export"
+  "AI Slop Scan"
+  "CodeQL"
+  "Trivy"
+  "i18n"
+  "Install test"
+  "Refresh standalone Ryotunes package"
+  "Testing gate"
+  "Publish [ryoku] repo"
+  "Publish Ryoku XBPS repo"
+  "Publish Ryoku Fedora RPM repos"
+  "Build ISO"
+  "Build CachyOS ISO"
+  "Build Void ISO"
+  "Release Ledger"
+  "Stable Release"
+  "Refresh pins"
+  "R2 retention"
+)
+
+usage() {
+  cat <<'EOF'
+usage: ryoku-ci-gate <sha> [--timeout-min N] [--grace-sec N] [--json]
+
+Wait for all required GitHub Actions checks on SHA. A check is advisory when
+its job or workflow name is in the set below; checks from non-GitHub-Actions
+apps are advisory too. All other checks are required.
+
+flags:
+  --timeout-min N  stop waiting after N minutes (default: 30)
+  --grace-sec N    wait N seconds for required checks to appear (default: 90)
+  --json           print one JSON result instead of the compact table
+  --help           show this help
+
+advisory workflows/job names:
+EOF
+  printf '  %s\n' "${advisory_workflows[@]}"
+  cat <<'EOF'
+
+exit codes:
+  0  all required checks passed, or none appeared during the grace period
+  1  one or more required checks failed
+  2  the timeout elapsed before all required checks completed
+  3  invalid usage
+EOF
+}
+
+log() { printf 'ryoku-ci-gate: %s\n' "$*" >&2; }
+die() { log "$*"; exit 1; }
+usage_error() {
+  log "$1"
+  usage >&2
+  exit 3
+}
+need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
+
+(($#)) || usage_error "missing commit SHA"
+case "$1" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+sha=$1
+shift
+timeout_min=30
+grace_sec=90
+json_output=0
+while (($#)); do
+  case "$1" in
+    --timeout-min)
+      (($# >= 2)) || usage_error "--timeout-min needs a value"
+      timeout_min=$2
+      shift 2
+      ;;
+    --grace-sec)
+      (($# >= 2)) || usage_error "--grace-sec needs a value"
+      grace_sec=$2
+      shift 2
+      ;;
+    --json)
+      json_output=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *) usage_error "unknown argument: $1" ;;
+  esac
+done
+
+[[ $timeout_min =~ ^[1-9][0-9]*$ ]] || usage_error "--timeout-min must be a positive integer"
+[[ $grace_sec =~ ^[0-9]+$ ]] || usage_error "--grace-sec must be a non-negative integer"
+[[ -n ${GITHUB_REPOSITORY:-} ]] || die "GITHUB_REPOSITORY is not set"
+[[ -n ${GH_TOKEN:-} ]] || die "GH_TOKEN is not set"
+need gh
+need jq
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+checks_json="$tmp/checks.json"
+printf '[]\n' > "$checks_json"
+declare -A workflow_names=()
+resolved_workflow=
+
+is_advisory() {
+  local candidate=$1 advisory
+  for advisory in "${advisory_workflows[@]}"; do
+    [[ $candidate == "$advisory" ]] && return 0
+  done
+  return 1
+}
+
+workflow_for_url() {
+  local html_url=$1 run_id workflow
+  resolved_workflow=
+  if [[ $html_url =~ /actions/runs/([0-9]+)/job/ ]]; then
+    run_id=${BASH_REMATCH[1]}
+  else
+    return
+  fi
+  if [[ ${workflow_names[$run_id]+known} ]]; then
+    resolved_workflow=${workflow_names[$run_id]}
+    return
+  fi
+  if workflow=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '.name // ""' 2>/dev/null); then
+    workflow_names[$run_id]=$workflow
+  else
+    workflow_names[$run_id]=
+    log "could not resolve workflow for Actions run $run_id; treating its checks as required"
+  fi
+  resolved_workflow=${workflow_names[$run_id]}
+}
+
+emit_result() {
+  local result=$1 code=$2
+  if ((json_output)); then
+    jq -cn --arg sha "$sha" --arg result "$result" --slurpfile checks "$checks_json" \
+      '{sha: $sha, result: $result, checks: $checks[0]}'
+  else
+    printf 'CHECK\tCONCLUSION\n'
+    jq -r '.[] | [.name, .conclusion] | @tsv' "$checks_json"
+    printf 'result\t%s\n' "$result"
+  fi
+  exit "$code"
+}
+
+start=$SECONDS
+timeout_sec=$((timeout_min * 60))
+while true; do
+  pages="$tmp/check-runs-pages.json"
+  if ! gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --paginate > "$pages"; then
+    die "could not read check runs for $sha"
+  fi
+  if ! jq -s '[.[].check_runs[]]' "$pages" > "$tmp/all-checks.json"; then
+    die "GitHub returned invalid check-run data for $sha"
+  fi
+
+  : > "$tmp/required.ndjson"
+  required=0
+  pending=0
+  failed=0
+  mapfile -t check_runs < <(jq -c '.[]' "$tmp/all-checks.json")
+  for check_run in "${check_runs[@]}"; do
+    app_slug=$(jq -r '.app.slug // ""' <<< "$check_run")
+    [[ $app_slug == github-actions ]] || continue
+
+    name=$(jq -r '.name // ""' <<< "$check_run")
+    html_url=$(jq -r '.html_url // ""' <<< "$check_run")
+    workflow_for_url "$html_url"
+    if is_advisory "$name" || is_advisory "$resolved_workflow"; then
+      continue
+    fi
+
+    status=$(jq -r '.status // ""' <<< "$check_run")
+    conclusion=$(jq -r '.conclusion // ""' <<< "$check_run")
+    shown_conclusion=$conclusion
+    [[ -n $shown_conclusion ]] || shown_conclusion=$status
+    jq -cn --arg name "$name" --arg conclusion "$shown_conclusion" \
+      '{name: $name, conclusion: $conclusion}' >> "$tmp/required.ndjson"
+    ((required += 1))
+
+    if [[ $status != completed ]]; then
+      ((pending += 1))
+      continue
+    fi
+    case "$conclusion" in
+      success|skipped|neutral) ;;
+      failure|cancelled|timed_out|action_required|stale) ((failed += 1)) ;;
+      *) ((failed += 1)) ;;
+    esac
+  done
+
+  if [[ -s $tmp/required.ndjson ]]; then
+    jq -s '.' "$tmp/required.ndjson" > "$checks_json"
+  else
+    printf '[]\n' > "$checks_json"
+  fi
+
+  elapsed=$((SECONDS - start))
+  if ((elapsed >= grace_sec)); then
+    if ((required == 0)); then
+      emit_result passed 0
+    fi
+    if ((pending == 0)); then
+      if ((failed > 0)); then
+        emit_result failed 1
+      fi
+      emit_result passed 0
+    fi
+  fi
+  if ((elapsed >= timeout_sec)); then
+    emit_result timeout 2
+  fi
+
+  if ((required == 0)); then
+    log "waiting for required checks to appear"
+  else
+    log "waiting for $pending of $required required checks"
+  fi
+  sleep_for=20
+  timeout_remaining=$((timeout_sec - elapsed))
+  if ((sleep_for > timeout_remaining)); then
+    sleep_for=$timeout_remaining
+  fi
+  if ((elapsed < grace_sec)); then
+    grace_remaining=$((grace_sec - elapsed))
+    if ((sleep_for > grace_remaining)); then
+      sleep_for=$grace_remaining
+    fi
+  fi
+  sleep "$sleep_for"
+done

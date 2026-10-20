@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# Regenerate Void's Limine menu after dracut creates or removes an initramfs.
+# RYOKU_LIMINE_BIOS_SYS overrides the packaged BIOS image for tests.
+set -euo pipefail
+
+boot_dir=${RYOKU_LIMINE_BOOT_DIR:-/boot}
+conf=${RYOKU_LIMINE_CONF:-$boot_dir/limine.conf}
+cmdline_file=${RYOKU_LIMINE_CMDLINE_FILE:-/etc/kernel/cmdline}
+branding_file=${RYOKU_LIMINE_BRANDING_FILE:-/etc/ryoku/limine-branding.conf}
+extra_file=${RYOKU_LIMINE_EXTRA_FILE:-/etc/ryoku/limine-extra.conf}
+windows_helper=${RYOKU_WINDOWS_HELPER:-/usr/local/bin/ryoku-windows-entry}
+modules_dir=${RYOKU_MODULES_DIR:-/usr/lib/modules}
+snapper_config=${RYOKU_SNAPPER_ROOT_CONFIG:-/etc/snapper/configs/root}
+lock_file=${RYOKU_LIMINE_LOCK_FILE:-/run/lock/boot-partition.lock}
+bios_source=${RYOKU_LIMINE_BIOS_SYS:-/usr/share/limine/limine-bios.sys}
+bios_installed=$boot_dir/limine/limine-bios.sys
+bios_tmp=
+
+[[ -r $branding_file ]] || exit 0
+
+snapshots_enabled=false
+if command -v limine-snapper-sync >/dev/null 2>&1 && [[ -r $snapper_config ]]; then
+  snapshots_enabled=true
+fi
+
+mkdir -p "$boot_dir" "$(dirname "$conf")"
+tmp=$(mktemp "${conf}.tmp.XXXXXX")
+lock_held=false
+cleanup() {
+  rm -f "$tmp"
+  [[ -z $bios_tmp ]] || rm -f "$bios_tmp"
+  if [[ $lock_held == true ]]; then
+    flock --unlock "$lock_fd" || true
+  fi
+}
+trap cleanup EXIT HUP INT TERM
+
+if [[ $snapshots_enabled == true || -e $bios_installed ]]; then
+  mkdir -p "$(dirname "$lock_file")"
+  exec {lock_fd}>"$lock_file"
+  flock --timeout=30 "$lock_fd"
+  lock_held=true
+fi
+
+cmdline=${RYOKU_LIMINE_CMDLINE:-}
+if [[ -z $cmdline && -r $cmdline_file ]]; then
+  cmdline=$(awk 'NF { print; exit }' "$cmdline_file")
+fi
+if [[ -z $cmdline ]]; then
+  cmdline='rw'
+fi
+
+mapfile -t kernels < <(
+  shopt -s nullglob
+  for kernel in "$boot_dir"/vmlinuz-*; do
+    version=${kernel##*/vmlinuz-}
+    if [[ -f $boot_dir/initramfs-$version.img && -d $modules_dir/$version ]]; then
+      printf '%s\n' "$version"
+    fi
+  done | sort -Vr
+)
+
+declare -a entries=()
+declare -A used_entries=()
+for version in "${kernels[@]}"; do
+  if [[ $version =~ ^([0-9]+)\.([0-9]+)([^0-9]|$) ]]; then
+    entry="linux${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+  else
+    safe=${version//[^[:alnum:]._-]/_}
+    [[ -n $safe ]] || safe=kernel
+    entry="linux-$safe"
+  fi
+  if [[ -n ${used_entries[$entry]:-} ]]; then
+    safe=${version//[^[:alnum:]._-]/_}
+    entry="$entry-$safe"
+    suffix=2
+    while [[ -n ${used_entries[$entry]:-} ]]; do
+      entry="$entry-$suffix"
+      ((suffix += 1))
+    done
+  fi
+  used_entries[$entry]=1
+  entries+=("$entry")
+done
+
+default_entry='Ryoku Linux'
+if ((${#entries[@]} > 0)); then
+  default_entry="Ryoku Linux/${entries[0]}"
+fi
+
+awk '
+  /^[[:space:]]*\// { exit }
+  /^[[:space:]]*#/ { next }
+  /^[[:space:]]*default_entry[[:space:]]*:/ { next }
+  { print }
+' "$branding_file" >"$tmp"
+printf 'default_entry: %s\n\n/Ryoku Linux\n' "$default_entry" >>"$tmp"
+
+for i in "${!kernels[@]}"; do
+  version=${kernels[$i]}
+  entry=${entries[$i]}
+  # Limine allows only comments between a directory title and its first entry.
+  if ((i > 0)); then
+    printf '\n' >>"$tmp"
+  fi
+  cat >>"$tmp" <<EOF
+  //$entry
+  comment: Kernel version: $version
+  comment: kernel-id=$entry
+  protocol: linux
+  path: boot():/vmlinuz-$version
+  module_path: boot():/initramfs-$version.img
+  cmdline: $cmdline
+EOF
+done
+
+copy_snapshot_tree() {
+  awk '
+    !found {
+      if ($0 ~ /^[[:space:]]*\/\/Snapshots[[:space:]]*$/) {
+        found = 1
+        print
+      }
+      next
+    }
+    /^[[:space:]]*\/[^\/]/ { exit }
+    /^[[:space:]]*\/\/[^\/]/ { exit }
+    { print }
+    END { if (!found) exit 1 }
+  ' "$1"
+}
+
+if [[ $snapshots_enabled == true ]]; then
+  printf '\n' >>"$tmp"
+  if [[ ! -r $conf ]] || ! copy_snapshot_tree "$conf" >>"$tmp"; then
+    printf '  //Snapshots\n' >>"$tmp"
+  fi
+fi
+
+if [[ -r $extra_file ]]; then
+  if [[ $snapshots_enabled != true ]]; then
+    printf '\n' >>"$tmp"
+  fi
+  cat "$extra_file" >>"$tmp"
+fi
+
+chmod 0644 "$tmp"
+mv -f "$tmp" "$conf"
+
+if [[ $snapshots_enabled == true ]]; then
+  limine-snapper-sync --no-mutex </dev/null || printf '50-ryoku-limine: limine-snapper-sync could not refresh the Snapshots menu\n' >&2
+fi
+
+if [[ -x $windows_helper ]]; then
+  "$windows_helper" sync "$conf" >/dev/null 2>&1 || true
+fi
+
+bios_log_error() {
+  local message=$1
+  printf '50-ryoku-limine: %s\n' "$message" >&2
+  if command -v logger >/dev/null 2>&1; then
+    logger -t 50-ryoku-limine -- "$message" || true
+  fi
+}
+
+refresh_limine_bios() {
+  [[ -e $bios_installed ]] || return 0
+  if [[ ! -r $bios_source ]]; then
+    bios_log_error "BIOS refresh skipped: packaged image is missing: $bios_source"
+    return 0
+  fi
+  cmp -s "$bios_source" "$bios_installed" && return 0
+
+  local -a boot_sources=() parents=() bios_parts=()
+  local boot_source parent disk partnum
+  mapfile -t boot_sources < <(findmnt -nro SOURCE --target "$boot_dir" 2>/dev/null | awk 'NF')
+  if ((${#boot_sources[@]} != 1)); then
+    bios_log_error "BIOS refresh skipped: could not identify the device mounted at $boot_dir"
+    return 0
+  fi
+  boot_source=${boot_sources[0]}
+  mapfile -t parents < <(lsblk -nro PKNAME "$boot_source" 2>/dev/null | awk 'NF')
+  if ((${#parents[@]} != 1)); then
+    bios_log_error "BIOS refresh skipped: could not identify the parent disk of $boot_source"
+    return 0
+  fi
+  parent=${parents[0]##*/}
+  disk=/dev/$parent
+  mapfile -t bios_parts < <(
+    lsblk -nrpo NAME,PARTTYPE,PARTN "$disk" 2>/dev/null |
+      awk 'tolower($2) == "21686148-6449-6e6f-744e-656564454649" { print $3 }'
+  )
+  if ((${#bios_parts[@]} != 1)) || [[ ! ${bios_parts[0]} =~ ^[0-9]+$ ]]; then
+    bios_log_error "BIOS refresh skipped: expected one GPT BIOS boot partition on $disk"
+    return 0
+  fi
+  partnum=${bios_parts[0]}
+
+  bios_tmp=$(mktemp "$boot_dir/limine/.limine-bios.sys.XXXXXX")
+  cp -f "$bios_source" "$bios_tmp"
+  # The disk stage and limine-bios.sys must come from the same Limine version.
+  # Install the stage first, then atomically publish its matching image.
+  if ! limine bios-install "$disk" "$partnum"; then
+    rm -f "$bios_tmp"
+    bios_tmp=
+    bios_log_error "BIOS refresh failed: limine bios-install $disk $partnum"
+    return 0
+  fi
+  mv -f "$bios_tmp" "$bios_installed"
+  bios_tmp=
+  sync
+}
+
+loader=${RYOKU_LIMINE_LOADER:-/usr/share/limine/BOOTX64.EFI}
+shared_efi=${RYOKU_LIMINE_SHARED_ESP:-/efi}
+if [[ -r $loader ]]; then
+  for target in \
+    "$boot_dir/EFI/BOOT/BOOTX64.EFI" \
+    "$boot_dir/EFI/ryoku/BOOTX64.EFI" \
+    "$boot_dir/ryoku-limine.efi" \
+    "$shared_efi/EFI/ryoku/BOOTX64.EFI"; do
+    if [[ -e $target ]]; then cp -f "$loader" "$target"; fi
+  done
+fi
+
+refresh_limine_bios
+
+if [[ $lock_held == true ]]; then
+  flock --unlock "$lock_fd"
+  lock_held=false
+fi
+trap - EXIT HUP INT TERM

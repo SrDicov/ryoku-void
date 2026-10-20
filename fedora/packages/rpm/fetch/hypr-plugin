@@ -1,0 +1,30 @@
+# shellcheck shell=bash
+set -euo pipefail
+
+: "${RYOKU_FETCH_TREE:?}"
+: "${package:?}"
+: "${repo:?}"
+: "${source_name:?}"
+
+dest="$RYOKU_FETCH_TREE/.rpm-$package/$source_name"
+rm -rf "$dest"
+mkdir -p "${dest%/*}"
+git clone -q "$repo" "$dest"
+
+hyprland_version=$(pkg-config --modversion hyprland)
+commit=$(grep -F "$hyprland_version" "$dest/hyprpm.toml" | grep -oE '[0-9a-f]{40}' | sed -n '2p' || true)
+if [[ -z $commit ]]; then
+  commit=$(git -C "$dest" rev-parse HEAD)
+fi
+[[ $commit =~ ^[0-9a-f]{40}$ ]]
+git -C "$dest" checkout -q --detach "$commit"
+[[ $(git -C "$dest" rev-parse HEAD) == "$commit" ]]
+
+if [[ ${recursive:-0} == 1 ]]; then
+  git -C "$dest" submodule update --init --recursive
+  git -C "$dest" submodule foreach --quiet --recursive \
+    'commit=$(git rev-parse HEAD); test ${#commit} -eq 40 && case "$commit" in *[!0-9a-f]*) exit 1;; esac'
+fi
+
+printf '%s\n' "$commit" > "$dest/.ryoku-source-commit"
+find "$dest" -depth -name .git -exec rm -rf {} +

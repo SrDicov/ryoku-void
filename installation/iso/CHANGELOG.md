@@ -3,6 +3,35 @@
 ## Unreleased
 
 ### Fixed
+- **The CachyOS ISO bakes CachyOS's own builds.** `offline-repo.sh` listed
+  Arch's core, extra and multilib above the generic `[cachyos]` repo, so the
+  closure took Arch's build of everything CachyOS forks (pacman, mesa,
+  linux-firmware, limine, plymouth) and `linux-cachyos-nvidia-open` could not
+  find the `nvidia-utils` it pins. `[cachyos]` now sits above Arch's repos, as
+  a CachyOS install orders it. The bake stays generic x86-64, so it installs on
+  any CPU, as CachyOS's own offline install does. An `aur.packages` name a
+  configured repo serves (`zen-browser-bin`) is fetched from it instead of
+  built, and so are the 580xx and 470xx legacy NVIDIA drivers, which
+  `[cachyos]` builds for its kernels. Only builds pacman resolved are staged,
+  and a cached AUR build with a repo build's filename but not its checksum is
+  dropped before the download. The required NVIDIA set follows the variant's
+  kernels (`linux-cachyos-nvidia-open`, `linux-cachyos-lts-nvidia-open`,
+  `nvidia-open-dkms`).
+- **A local build no longer trips the pre-build gates.** `build.sh` keeps one
+  package cache per variant (`offline-cache-$VARIANT`), which the gitignore did
+  not cover, so the multi-GB cache showed up as untracked. `iso-preflight.sh`
+  linted the vendored scripts a build leaves in `staging/`, and woke died on the
+  root-owned `work/` that mkarchiso leaves behind. The caches are ignored and
+  both gates lint only git's file list.
+- **Both ISO staging paths carry the shared installer-choice manifest.** The
+  prebuilt TUI and Bash backend now resolve the same browser, login-shell and
+  compositor policy inside Arch, CachyOS and Void live images.
+- **Dvorak, Colemak and other keyboard variants carry into the installer.** The
+  graphical installer switched its keyboard to the base layout only, so picking
+  Dvorak captured the disk passphrase on QWERTY while the boot unlock prompt
+  used Dvorak, and the passphrase never matched. The installer now relaunches
+  under the layout and its variant (`tui/system.go`, `ryoku-installer-session`).
+
 - **The offline package closure now carries `asusctl`.** Supported ASUS Aura
   laptops can select the native keyboard-lighting provider during an offline
   install without making every target install laptop-specific control software.
@@ -10,7 +39,7 @@
 - **A truncated package no longer ships in the offline repo.** `offline-repo.sh`
   downloaded the closure with `pacman -Sw --needed` into a persistent cache and
   reflinked it in with no integrity check, so a download cut short by one network
-  hiccup (most likely on a big package like the ryomotion Electron app) sat
+  hiccup (most likely on a big package) sat
   corrupt in the cache forever (`--needed` never re-fetches a file that already
   exists by name) and shipped in every ISO, bricking the offline pacstrap with a
   "truncated <pkg>" error. The bake now verifies every cached package with
@@ -19,6 +48,16 @@
   ISO). Covered by `tests/offline-repo-integrity.sh`.
 
 ### Added
+- **`RYOKU_ISO_WORKTREE=1` builds a test ISO from uncommitted work.** The
+  payload under `/usr/share/ryoku` is baked with `git archive HEAD`, so an
+  uncommitted package-list or config change reached the TUI and backend on a
+  local ISO but not the payload. The option archives the working tree through a
+  throwaway index instead: no commit, the real index untouched, ignored files
+  still left out. The payload commit is tagged `+worktree`.
+- The offline closure ships GPU Screen Recorder. `base.packages` swaps
+  `wf-recorder` for `gpu-screen-recorder`, so the baked `[offline]` repo carries
+  the GPU-only recorder; Ryoku Motion (`ryomotion`) is no longer built, so it
+  drops out of the closure.
 - **Two ISO variants from one tree (`RYOKU_VARIANT` plain|cachyos), both fully
   offline.** `build.sh` bakes the whole package closure into a `file://`
   `[offline]` repo so the installer pacstraps with no network, and a

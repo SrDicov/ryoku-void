@@ -4,6 +4,7 @@
 // a single screen-facing border and shadow replace the rounded section islands.
 // ─────────────────────────────────────────────────────────────────────────────
 import QtQuick
+import Ryoku.Ui.Singletons
 import QtQuick.Effects
 import QtQuick.Shapes
 import Quickshell
@@ -12,11 +13,49 @@ import Quickshell.Io
 import "modules"
 import shell.services as Svc
 import Ryoku.PluginKit
+import Ryoku.Ui.Singletons
+import shell.modules.stage.frame
 
 PanelWindow {
     id: barSlot
     required property var root
     readonly property string screenName: barSlot.screen ? barSlot.screen.name : ""
+    // The bar frosts with the desktop while a window owns this screen's
+    // active workspace — the same presence rule the desktop scrim answers
+    // to, counted rather than merely felt so the haze can deepen with each
+    // window behind the front. The window's workspace key carries the id,
+    // so the match is against ids.
+    readonly property int deckFrostCount: {
+        const act = []
+        const wsl = Wm.workspaces
+        for (let i = 0; i < wsl.length; i++)
+            if (wsl[i].active) act.push(wsl[i].id)
+        if (act.length === 0)
+            return 0
+        let n = 0
+        const wins = Wm.windows
+        for (let i = 0; i < wins.length; i++) {
+            const w = wins[i]
+            if (w.output !== barSlot.screenName || (w.toplevel && w.toplevel.minimized))
+                continue
+            if (act.indexOf(w.workspace) !== -1)
+                n++
+        }
+        return n
+    }
+    // The shell silhouette frosts with the desktop canvas at the same depth
+    // (Config.deckFrostIntensity), as translucency on the bar's own fills.
+    // Not a plate over the window: this window spans the whole output (the
+    // popups need it), so a fill of it would frost the windows too —
+    // including the one in focus.
+    readonly property color shellFill: {
+        const c = barSlot.root.barBg
+        const k = barSlot.deckFrostCount > 0
+            ? 1 - Math.max(0, Math.min(1,
+                Svc.Config.deckFrostIntensity(barSlot.deckFrostCount)))
+            : 1
+        return Qt.rgba(c.r, c.g, c.b, c.a * k)
+    }
     // islands renders as separate per-region pills but uses the full-width
     // spread layout (rows anchored to the edges), so it is NOT a compact shell.
     readonly property bool islandsShell: barSlot.root.barShellStyle === "islands"
@@ -61,7 +100,7 @@ PanelWindow {
         top:    barSlot.root.barPosition === "top"
         bottom: barSlot.root.barPosition === "bottom"
     }
-    implicitHeight: barSlot.screen ? barSlot.screen.height : 1440
+    implicitHeight: frameLayer.extent
     exclusionMode: ExclusionMode.Normal
     // Same reservation for every shell style, widened by the gaps so a client
     // never slides behind the bar.
@@ -73,29 +112,47 @@ PanelWindow {
     // shrinks it to a thin trigger while hidden; the lead gap otherwise stays
     // clickable so slamming the pointer at the edge never hits the window behind.
     mask: Region {
-        x: (barSlot.root.barUnlocked || barSlot.root.barAutoHide)
-           ? 0 : Math.round(continuousBarSurface.x)
-        y: barSlot.root.barUnlocked ? 0
-           : (barSlot.root.barPosition === "bottom"
-                ? barSlot.height - barSlot.maskDepth : 0)
-        width: (barSlot.root.barUnlocked || barSlot.root.barAutoHide)
-               ? barSlot.width : Math.round(continuousBarSurface.width)
-        height: barSlot.root.barUnlocked ? barSlot.height : barSlot.maskDepth
+        x: Math.round(barSlot.framedInputRect.x)
+        y: Math.round(barSlot.framedInputRect.y)
+        width: Math.round(barSlot.framedInputRect.width)
+        height: Math.round(barSlot.framedInputRect.height)
     }
     // grab keyboard while unlocked so ESC can exit
     WlrLayershell.keyboardFocus: barSlot.root.barUnlocked ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+    // This window is already output-sized. The layer therefore keeps its
+    // extent, but moves the bar body and its input strip with the Stage card.
+    StageFramedLayer {
+        id: frameLayer
+        interactive: false
+        screenName: barSlot.screenName
+        edge: barSlot.root.barPosition
+        restThickness: barSlot.screen?.height ?? 1440
+        screenWidth: barSlot.screen?.width ?? 1920
+        screenHeight: barSlot.screen?.height ?? 1440
+    }
+
 
     // ── auto-hide reveal state ──
     property bool hovering: false
     // Shown when auto-hide is off, the pointer is on the reveal strip, a bar
     // popup is open, or the layout is unlocked for editing.
-    readonly property bool barShown: !barSlot.root.barAutoHide
-        || barSlot.hovering || barSlot.root.barUnlocked || barSlot.root.anyPopupVisible
+    readonly property bool barShown: frameLayer.framed
+        || !barSlot.root.barAutoHide || barSlot.hovering
+        || barSlot.root.barUnlocked || barSlot.root.anyPopupVisible
     readonly property int revealBand: barSlot.shellVisibleHeight + barSlot.gapLead
     readonly property int revealTriggerPx: 5
     readonly property int maskDepth: barSlot.root.barAutoHide
         ? (barSlot.barShown ? barSlot.revealBand : barSlot.revealTriggerPx)
         : barSlot.revealBand
+    readonly property rect framedInputRect: frameLayer.maskRect(
+        (barSlot.root.barUnlocked || barSlot.root.barAutoHide)
+            ? 0 : Math.round(continuousBarSurface.x),
+        barSlot.root.barUnlocked ? 0
+            : (barSlot.root.barPosition === "bottom"
+                ? barSlot.height - barSlot.maskDepth : 0),
+        (barSlot.root.barUnlocked || barSlot.root.barAutoHide)
+            ? barSlot.width : Math.round(continuousBarSurface.width),
+        barSlot.root.barUnlocked ? barSlot.height : barSlot.maskDepth)
     // The visible layers slide this far past the anchored edge when hidden.
     readonly property real hideDistance: barSlot.revealBand + 8
     property real hideShift: barSlot.barShown ? 0
@@ -135,6 +192,7 @@ PanelWindow {
     // bottom placement mirrors it so the shadow still opens toward the desktop.
     Rectangle {
         id: continuousBarSurface
+        parent: frameLayer.rest
         transform: Translate { y: barSlot.hideShift }
         x: barSlot.compactShell
             ? Math.round(barSlot.gapLeft + (barSlot.shellSpan - width) / 2)
@@ -200,7 +258,7 @@ PanelWindow {
 
             ShapePath {
                 strokeColor: "transparent"
-                fillColor: barSlot.root.barBg
+                fillColor: barSlot.shellFill
                 startX: continuousBarSurface.topCornerRadius
                 startY: 0
                 PathLine { x: topSurfaceFill.width - continuousBarSurface.topCornerRadius; y: 0 }
@@ -260,7 +318,7 @@ PanelWindow {
 
             ShapePath {
                 strokeColor: "transparent"
-                fillColor: barSlot.root.barBg
+                fillColor: barSlot.shellFill
                 startX: continuousBarSurface.topCornerRadius
                 startY: 0
                 PathLine {
@@ -330,7 +388,7 @@ PanelWindow {
 
             ShapePath {
                 strokeColor: "transparent"
-                fillColor: barSlot.root.barBg
+                fillColor: barSlot.shellFill
                 startX: notchSurfaceFillTop.bodyLeft - barSlot.notchShoulderWidth
                 startY: 0
                 PathLine {
@@ -412,7 +470,7 @@ PanelWindow {
 
             ShapePath {
                 strokeColor: "transparent"
-                fillColor: barSlot.root.barBg
+                fillColor: barSlot.shellFill
                 startX: notchSurfaceFillBottom.bodyLeft - barSlot.notchShoulderWidth
                 startY: notchSurfaceFillBottom.height
                 PathLine {
@@ -688,6 +746,7 @@ PanelWindow {
 
     // ── dim backdrop while unlocked (edit mode); click empty → lock ──
     Rectangle {
+        parent: frameLayer.rest
         anchors.fill: parent
         color: "#000000"
         opacity: barSlot.root.barUnlocked ? 0.4 : 0.0
@@ -1094,7 +1153,7 @@ PanelWindow {
                 cursorShape: Qt.PointingHandCursor
                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                 onClicked: (e) => {
-                    if (e.button === Qt.RightButton) barSlot.root.clock12h = !barSlot.root.clock12h
+                    if (e.button === Qt.RightButton) TimeFormat.set24h(barSlot.root.clock12h)
                     else g8.openDash()
                 }
             }
@@ -1874,6 +1933,7 @@ PanelWindow {
 
     Item {
         id: island
+        parent: frameLayer.rest
         transform: Translate { y: barSlot.hideShift }
         // The backing layer-window remains full-screen, but the visible/content
         // island follows the selected shell surface. This preserves stable
@@ -2104,7 +2164,7 @@ PanelWindow {
                     Math.min(island.width - barSlot.shellOuterMargin, rawRight) - x)
                 height: island.height
                 radius: barSlot.root.barCornerRadius
-                color: barSlot.root.barBg
+                color: barSlot.shellFill
                 border.color: barSlot.root.v2BarBorder
                 border.width: barSlot.root.barBorderEnabled ? 1 : 0
                 z: 0
@@ -2284,6 +2344,7 @@ PanelWindow {
     // rounded rectangles while the connected indentation always stays visible.
     Item {
         id: foregroundEdgeBorder
+        parent: frameLayer.rest
         transform: Translate { y: barSlot.hideShift }
         x: continuousBarSurface.x
         y: continuousBarSurface.y

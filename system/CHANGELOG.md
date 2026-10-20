@@ -2,6 +2,73 @@
 
 ## Unreleased
 
+- **Logging out fully releases the graphical session.** When login1 removes the
+  desktop session, the power lifecycle now stops its graphical session targets
+  as well as Ryoku's services, so the next desktop can start cleanly.
+
+- **Authorization rules survive desktop package upgrades.** Arch, Fedora, and
+  Void ask the running polkit daemon for a full rules reload only after their
+  package transaction has finished writing Ryoku's rules, without restarting
+  the daemon or disconnecting the desktop authentication agent.
+
+- **Service activation now comes from one manifest.** Arch, Fedora, and Void
+  package hooks reconcile the same system service policy, while doctor
+  reconciles each user's session roster without reviving services they disabled.
+  A new systemd unit and runit service become active on update after one
+  `system/services/manifest.tsv` row.
+
+- **System package actions now work on Fedora.** The package helpers and
+  Ryostore route installs, removals, availability checks, and native advice
+  through the DNF host seam instead of assuming pacman. The Fedora installer
+  uses the shared hardware and session helpers, switches GDM to SDDM, and keeps
+  NVIDIA on nouveau in this release.
+- **Void and Fedora share one package-lane resolver.**
+  `system/packages/resolve` reads either edition's translation table for the
+  desktop, development, hardware, session, and compositor lanes.
+
+- **Package cutover waits for the native transaction.** The deferred live
+  session cutover now waits for DNF or RPM work and the XBPS lock as well as
+  pacman's database lock.
+
+- **The system helpers ask the host instead of assuming systemd and pacman.**
+  DNS, the network kill switch, the Wi-Fi backend and region, Docker, the audio
+  restart, 32-bit GPU libraries and the AMD, Intel, Vulkan and NVIDIA driver
+  steps now go through `ryoku-host`, so they behave the same on Void's runit
+  and xbps as on Arch. Arch runs the same commands as before. On Void, NVIDIA
+  installs the generation-correct nonfree branch, matching headers and optional
+  32-bit libraries, then enables early KMS only after the module exists. A
+  pre-initramfs kernel hook restores nouveau automatically when a later DKMS
+  build fails.
+
+- **Void exposes system service health to the desktop doctor.** Its package
+  grants wheel users one passwordless, fixed-argument read-only
+  `ryoku-host svc --system failed` query; every other root action keeps the
+  existing sudo policy.
+
+- **Void keeps live sessions safe through package cutovers and kernel updates.**
+  Runit sessions now use `ryoku-host` transient guards and elogind inhibitors
+  while sleep, lid, lock, and wallpaper owners are replaced. The packaged Void
+  kernel hook also rebuilds the Limine menu after dracut creates or removes an
+  initramfs, so regular `ryoku update` deliveries keep installed systems current.
+
+- **Idle works on Void.** `ryoku-idle` drives swayidle when hypridle is not
+  installed, with the same lock, screen-off and suspend timers, so Void (which
+  packages swayidle, not hypridle) dims, locks and sleeps like Arch.
+
+- **The package power cutover only touches sessions Ryoku runs in.** The
+  `ryoku-desktop` hook used to pick up any Wayland session whose compositor has
+  a Ryoku provider. That included a rival shell's Hyprland session during a
+  shell install, where it started the Ryoku session inside that desktop. It now
+  skips sessions with no Ryoku daemon running. A failed cutover also stops its
+  qylock generation guard instead of leaving it holding the launch lock, which
+  blocked every lock screen and later `install-qylock` run.
+
+- **The base set gained the iRiS frame's fonts.** `ttf-rubik-vf` and
+  `ttf-readex-pro` join `base.packages`, both shipped from [ryoku], so every
+  install and update carries the numerals and title faces the frame's QML
+  hardcodes; without them the desktop renders on a fallback face with wrong
+  metrics.
+
 - **Lock, wake and lid each have one owner, and suspend now fails closed.** The
   shell daemon bound to the foreground graphical session owns login1's delay
   inhibitor and long-lived hard block. Before ownership moves, the outgoing
@@ -66,6 +133,12 @@
   (`system/hardware/gpu/ryoku-gpu`, `tests/gpu-pin-policy.sh`).
 
 ### Added
+- `hardware/gpu/ryoku-gpu`: `order --effective [PATH]` prints the AQ_DRM_DEVICES
+  value the compositor would actually read, straight from the pin file, while
+  the plain `order` keeps reporting the policy's recommendation (and keeps
+  exiting 1 under a stored hybrid/passthrough choice). doctor's reverse-PRIME
+  guard (#270) audits the machine as it is, and previously went blind exactly
+  when a forced or drifted pin coexisted with an opt-out mode stamp.
 - `ttf-maple-mono-nf` (release/packages + base.packages): Maple Mono, Nerd Font
   variant, shipped from [ryoku] as the upstream prebuilt NF release so it
   pacstraps on install and updates with `ryoku update`. Offered as the monospace
@@ -98,6 +171,18 @@
   package.
 
 ### Fixed
+- **The kill switch no longer locks the shared state dir.** `ryoku-network-kill`
+  created its marker's parent with `install -d -m 700`, which chmods an existing
+  directory: every Hub Connections toggle put `/var/lib/ryoku` back to
+  root-only, against the tmpfiles contract of 0755. Sessions then could not
+  record their boot-ok files and `ryoku update` could not stat the power-cutover
+  marker. The helper now matches the contract and repairs a drifted mode
+  (`hardware/network/ryoku-network-kill`, `tests/network-kill.sh`).
+- **Deploys and updates no longer strand a niri desktop.** On a niri login
+  started through niri-session the compositor runs outside the login scope, so
+  the power cutover found no session environment, stopped the shell and never
+  restarted it; it now falls back to the session's own Wayland clients
+  (`hardware/power/ryoku-power-cutover`).
 - `hardware/power/ryoku-power-cutover`: a killed generation guard releases
   its locks. The hold's keep-alive coprocess inherited the launch and
   generation flock fds, so a holder killed mid-swap left the locks pinned by

@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=${RYOKU_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+
+declare -A arch_packages=()
+
+fail() {
+	printf 'edition-parity: %s\n' "$*" >&2
+	exit 1
+}
+
+normalize_package() {
+	REPLY=${1%%:*}
+	REPLY=${REPLY%%[<>=]*}
+	REPLY=${REPLY#"${REPLY%%[![:space:]]*}"}
+	REPLY=${REPLY%"${REPLY##*[![:space:]]}"}
+}
+
+pkgbuild_values() {
+	local path=$1 field=$2
+	bash --noprofile --norc -c '
+		set -e
+		source "$1" >/dev/null
+		case $2 in
+			pkgname) printf "%s\n" "${pkgname[@]}" ;;
+			dependencies) printf "%s\n" "${depends[@]:-}" "${optdepends[@]:-}" ;;
+		esac
+	' _ "$path" "$field"
+}
+
+add_pkgbuild_names() {
+	local path=$1 values value
+	if ! values=$(pkgbuild_values "$path" pkgname); then
+		fail "could not read pkgname from ${path#"$root"/}"
+	fi
+	while IFS= read -r value; do
+		normalize_package "$value"
+		[[ -n $REPLY ]] && arch_packages["$REPLY"]=1
+	done <<< "$values"
+}
+
+shopt -s nullglob
+pkgbuilds=("$root"/release/packages/*/PKGBUILD)
+((${#pkgbuilds[@]} > 0)) || fail "no PKGBUILDs found under release/packages"
+for path in "${pkgbuilds[@]}"; do
+	add_pkgbuild_names "$path"
+done
+
+dependency_pkgbuilds=("$root"/release/packages/ryoku-desktop*/PKGBUILD)
+for name in ryoku-shell ryogami ryoku-rashin ryoku-hub ryoku; do
+	path="$root/release/packages/$name/PKGBUILD"
+	[[ -f $path ]] && dependency_pkgbuilds+=("$path")
+done
+for path in "${dependency_pkgbuilds[@]}"; do
+	if ! values=$(pkgbuild_values "$path" dependencies); then
+		fail "could not read dependencies from ${path#"$root"/}"
+	fi
+	while IFS= read -r value; do
+		normalize_package "$value"
+		[[ -n $REPLY ]] && arch_packages["$REPLY"]=1
+	done <<< "$values"
+done
+
+for list in "$root/system/packages/base.packages" "$root/system/packages/hardware.packages"; do
+	[[ -f $list ]] || fail "missing ${list#"$root"/}"
+	while IFS= read -r value || [[ -n $value ]]; do
+		value=${value%%#*}
+		value=${value#"${value%%[![:space:]]*}"}
+		value=${value%"${value##*[![:space:]]}"}
+		[[ -z $value || $value == \[*\] ]] && continue
+		normalize_package "$value"
+		[[ -n $REPLY ]] && arch_packages["$REPLY"]=1
+	done < "$list"
+done
+
+check_edition() {
+	local edition=$1 table=$2 kind=$3 artifact package line
+	local -A built=() rows=()
+	local -a missing=() reasonless=()
+
+	[[ -f $table ]] || fail "missing ${table#"$root"/}"
+	case $kind in
+		void)
+			for artifact in "$root"/void/packages/srcpkgs/*/template; do
+				package=${artifact%/template}
+				built["${package##*/}"]=1
+			done
+			;;
+		fedora)
+			for artifact in "$root"/fedora/packages/rpm/*.spec; do
+				package=${artifact##*/}
+				built["${package%.spec}"]=1
+			done
+			;;
+	esac
+
+	while IFS= read -r package; do
+		[[ -n $package ]] && rows["$package"]=1
+	done < <(awk -F '\t' 'NR > 1 && $0 !~ /^[[:space:]]*(#|$)/ { print $1 }' "$table")
+
+	while IFS= read -r line; do
+		[[ -n $line ]] && reasonless+=("$line")
+	done < <(awk -F '\t' '
+		NR > 1 && $0 !~ /^[[:space:]]*(#|$)/ && $2 == "-" && $4 !~ /[^[:space:]]/ {
+			printf "%s (line %d)\n", $1, NR
+		}
+	' "$table")
+
+	for package in "${!arch_packages[@]}"; do
+		[[ -n ${built[$package]:-} || -n ${rows[$package]:-} ]] || missing+=("$package")
+	done
+
+	printf '%s missing:\n' "$edition"
+	if ((${#missing[@]} == 0)); then
+		printf '  (none)\n'
+	else
+		printf '%s\n' "${missing[@]}" | LC_ALL=C sort -u | sed 's/^/  /'
+	fi
+	if ((${#reasonless[@]} > 0)); then
+		printf '%s reasonless exclusions:\n' "$edition"
+		printf '%s\n' "${reasonless[@]}" | LC_ALL=C sort -u | sed 's/^/  /'
+	fi
+
+	((${#missing[@]} == 0 && ${#reasonless[@]} == 0))
+}
+
+status=0
+check_edition Void "$root/void/packages/translations.tsv" void || status=1
+check_edition Fedora "$root/fedora/packages/translations.tsv" fedora || status=1
+if ((status == 0)); then
+	printf 'edition-parity: Arch, Void, and Fedora package coverage is complete\n'
+fi
+exit "$status"

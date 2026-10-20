@@ -1,0 +1,40 @@
+# Maintainer: Ryoku <releases@ryoku.dev>
+pkgname=ryomanager
+pkgver=0.1.0.r27.g459c671
+pkgrel=1
+pkgdesc="System monitor and process manager for Ryoku"
+arch=('x86_64')
+url="https://github.com/Ryoku-dev/ryomanager"
+license=('GPL-3.0-only')
+depends=('gtk3' 'webkit2gtk-4.1')
+makedepends=('go' 'nodejs' 'npm' 'pkgconf')
+options=('!debug')
+_commit=459c6714e31276f73025369e722cf4ab48eccbc3
+source=("$pkgname-$_commit.tar.gz::$url/archive/$_commit.tar.gz"
+        "$pkgname.desktop")
+sha256sums=('60b83e0663166035a5f81fa456d543ceb324d6286b9699f37d8a47fa460c39f7'
+            '272208da12aae75b258dd92bdd0978dff8c28708358802bfe565bbc3f2adbb52')
+
+build() {
+  cd "$srcdir/$pkgname-$_commit/frontend"
+  npm ci
+  npm run build
+
+  cd ..
+  export CGO_ENABLED=1
+  export GOPATH="$srcdir/gopath"
+  export GOCACHE="$srcdir/gocache"
+  export GOFLAGS='-mod=mod -modcacherw -buildmode=pie'
+  go build -trimpath -tags 'desktop,production,webkit2_41' \
+    -ldflags '-s -w' -o "$srcdir/$pkgname" .
+}
+
+package() {
+  cd "$srcdir/$pkgname-$_commit"
+  install -Dm755 "$srcdir/$pkgname" "$pkgdir/usr/bin/$pkgname"
+  install -Dm644 "$srcdir/$pkgname.desktop" \
+    "$pkgdir/usr/share/applications/$pkgname.desktop"
+  install -Dm644 build/appicon.png \
+    "$pkgdir/usr/share/icons/hicolor/64x64/apps/$pkgname.png"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

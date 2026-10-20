@@ -11,16 +11,23 @@ import (
 // asks it for argv and for the local name of a package; nothing else branches on
 // the distribution.
 //
-// fromSource distros have no [ryoku] repository, so the desktop is built from the
-// cloned payload with ryoku/shell/deploy.sh instead of installed with pacman.
+// Source-only distros have no Ryoku package repository, so the desktop is built
+// from the cloned payload with ryoku/shell/deploy.sh.
+type initSystem uint8
+
+const (
+	initSystemd initSystem = iota
+	initRunit
+)
+
 type distro struct {
 	id         string
 	name       string
 	fromSource bool
 
-	// rename maps a base.packages (Arch) name to the local one. A missing key
+	// rename maps an Arch package name to its local equivalent. A missing key
 	// means the name is identical; an empty value means the package does not
-	// exist here and is skipped.
+	// exist there and is skipped.
 	rename map[string]string
 
 	// z-repo (Void only): the third-party signed repository and the best-effort
@@ -34,11 +41,16 @@ type distro struct {
 	// Go programs, the Ryoku.Blobs QML plugin, and the Hyprland plugins.
 	build []string
 
-	installCmd []string
-	removeCmd  []string
-	updateCmd  []string
-	refreshCmd []string
-	queryCmd   []string
+	// runtime are the extra packages the translated base set does not express
+	// through Ryoku but the desktop needs at run time.
+	runtime []string
+
+	installCmd         []string
+	removeCmd          []string
+	updateCmd          []string
+	refreshCmd         []string
+	queryCmd           []string
+	installFirstPrefix string
 }
 
 var archLinux = &distro{
@@ -63,9 +75,9 @@ var debianLinux = &distro{
 	queryCmd:   []string{"dpkg-query", "-W", "-f=${Status}"},
 	build: []string{
 		"build-essential", "cmake", "ninja-build", "pkgconf", "golang",
-		"qt6-base-dev", "qt6-declarative-dev", "qt6-multimedia-dev",
+		"qt6-base-dev", "qt6-base-private-dev", "qt6-declarative-dev", "qt6-multimedia-dev",
 		"qt6-shadertools-dev", "qt6-svg-dev", "qt6-5compat-dev", "qt6-wayland-dev",
-		"hyprland-dev", "libhyprutils-dev",
+		"hyprland-dev", "libhyprutils-dev", "libgtk-3-dev", "libwebkit2gtk-4.1-dev",
 	},
 	rename: map[string]string{
 		"base":                    "",
@@ -116,91 +128,62 @@ var debianLinux = &distro{
 	},
 }
 
-// activeDistro is set once by detectFacts; installed() reads it from the
-// detection paths that have no engine to hand.
-var activeDistro = archLinux
-
-// Package names verified against the Void repodata index (x86_64,
-// 2026-09-30; 14790 packages). Void ships no Hyprland stack at all
-// (hyprland, hypridle and xdg-desktop-portal-hyprland are all absent), so a
-// Void install is niri-first and Hyprland is a hand-build; see docs/void.md.
+// Void installs the signed desktop packages from the Ryoku XBPS repository.
+// void/packages owns the package translation and transaction ordering.
 var voidLinux = &distro{
-	id:         "void",
-	name:       "Void",
-	fromSource: true,
-	installCmd: []string{"xbps-install", "-S", "-y"},
-	removeCmd:  []string{"xbps-remove", "-y"},
-	updateCmd:  []string{"xbps-install", "-Suy"},
-	refreshCmd: []string{"xbps-install", "-S"},
-	queryCmd:   []string{"xbps-query"},
-	// zrepo is the Z Linux binary repository (signed XBPS, glibc x86_64): the
-	// source for every package Void's official repos do not carry.
+	id:                 "void",
+	name:               "Void",
+	installCmd:         []string{"xbps-install", "-Sy"},
+	removeCmd:          []string{"xbps-remove", "-y"},
+	updateCmd:          []string{"xbps-install", "-Syu"},
+	refreshCmd:         []string{"xbps-install", "-S"},
+	queryCmd:           []string{"xbps-query"},
+	installFirstPrefix: "void-repo-",
+	// z-repo is the third-party signed XBPS repository: it serves what the
+	// Ryoku repo and Void's own repositories do not carry.
 	zrepoURL:     "https://github.com/SrDicov/z-repo/releases/download/stable",
 	zrepoKeyURL:  "https://raw.githubusercontent.com/SrDicov/z-repo/master/keys/zlinux-repo.pub",
 	zrepoKeyName: "zlinux-repo",
 	zrepoExtras:  []string{"zen-browser-bin"},
-	build: []string{
-		"base-devel", "go", "cmake", "ninja", "pkg-config",
-		"qt6-base-devel", "qt6-declarative-devel", "qt6-multimedia-devel",
-		"qt6-svg-devel", "qt6-wayland-devel", "qt6-shadertools-devel",
-		"qt6-qt5compat-devel", "wayland-devel", "vulkan-loader-devel",
-		"libdrm-devel", "elogind-devel",
-	},
-	rename: map[string]string{
-		"base":                    "",
-		"bluez-utils":             "bluez",
-		"fish":                    "fish-shell",
-		"gst-plugins-bad":         "gst-plugins-bad1",
-		"gst-plugins-base":        "gst-plugins-base1",
-		"gst-plugins-good":        "gst-plugins-good1",
-		"gst-plugins-ugly":        "gst-plugins-ugly1",
-		"imagemagick":             "ImageMagick",
-		"inter-font":              "font-inter",
-		"mangohud":                "MangoHud",
-		"networkmanager":          "NetworkManager",
-		"noto-fonts":              "noto-fonts-ttf",
-		"pipewire-alsa":           "alsa-pipewire",
-		"pipewire-audio":          "",
-		"pipewire-pulse":          "",
-		"python":                  "python3",
-		"python-pip":              "python3-pip",
-		"python-pipx":             "python3-pipx",
-		"npm":                     "",
-		"qemu-desktop":            "qemu",
-		"qt6-5compat":             "qt6-qt5compat",
-		"qt6-multimedia-ffmpeg":   "qt6-multimedia",
-		"tesseract-data-eng":      "tesseract-ocr-eng",
-		"ttf-firacode-nerd":       "",
-		"ttf-hack-nerd":           "",
-		"ttf-jetbrains-mono-nerd": "nerd-fonts-ttf",
-		// from z-repo (verified against its stable repodata, 80 packages)
-		"ttf-material-symbols-variable": "not-st",
-		"vimix-cursors":                 "bibata-cursor-theme",
-		"vulkan-icd-loader":             "vulkan-loader",
-		"xorg-xwayland":                 "xorg-server-xwayland",
-		"xpadneo-dkms":                  "xpadneo",
-		"amd-ucode":                     "linux-firmware-amd",
-		"intel-ucode":                   "linux-firmware-intel",
-
-		// Absent from Void: skipped here, hand-built or dropped per docs/void.md.
-		// (limine hooks are also in engine.go bootChainSkip; both must agree.)
-		"blesh":                  "",
-		"game-devices-udev":      "",
-		"hypridle":               "",
-		"limine-mkinitcpio-hook": "",
-		"limine-snapper-sync":    "",
-		"snap-pac":               "",
-		"ttf-maple-mono-nf":      "",
-		"waifu2x-ncnn-vulkan":    "",
-	},
 }
+
+func fedoraDNFCommand() string {
+	if _, err := exec.LookPath("dnf5"); err == nil {
+		return "dnf5"
+	}
+	return "dnf"
+}
+
+func newFedoraLinux() *distro {
+	dnf := fedoraDNFCommand()
+	return &distro{
+		id:         "fedora",
+		name:       "Fedora",
+		installCmd: []string{dnf, "install", "-y"},
+		removeCmd:  []string{dnf, "remove", "-y"},
+		updateCmd:  []string{dnf, "upgrade", "-y", "--refresh"},
+		refreshCmd: []string{dnf, "makecache", "--refresh", "-y"},
+		queryCmd:   []string{"rpm", "-q"},
+	}
+}
+
+// Fedora installs the signed desktop packages from the Ryoku RPM repository.
+// The command is refreshed during distro detection so dnf5 wins when present.
+var fedoraLinux = newFedoraLinux()
+
+// activeDistro is set once by detectFacts; installed() reads it from the
+// detection paths that have no engine to hand.
+var activeDistro = archLinux
 
 func detectDistro(id, like string) *distro {
 	switch {
-	case id == "arch" || strings.Contains(like, "arch"):
-		return archLinux
 	case id == "void":
 		return voidLinux
+	case id == "fedora" || strings.Contains(like, "fedora"):
+		fedoraLinux = newFedoraLinux()
+		return fedoraLinux
+	case id == "arch" || strings.Contains(like, "arch"):
+		return archLinux
 	case id == "debian" || strings.Contains(like, "debian"):
 		return debianLinux
 	}
@@ -218,8 +201,10 @@ func (d *distro) local(pkg string) string {
 // localAll maps a base.packages list, dropping what this distro does not carry.
 func (d *distro) localAll(pkgs []string) []string {
 	out := make([]string, 0, len(pkgs))
+	seen := make(map[string]bool, len(pkgs))
 	for _, p := range pkgs {
-		if l := d.local(p); l != "" {
+		if l := d.local(p); l != "" && !seen[l] {
+			seen[l] = true
 			out = append(out, l)
 		}
 	}
@@ -230,20 +215,69 @@ func (d *distro) installArgs(pkgs []string) []string {
 	return append(append([]string{}, d.installCmd...), pkgs...)
 }
 
+// installPhases keeps repository-enabling packages ahead of packages supplied
+// by those repositories. Distros without such bootstrap packages retain one
+// transaction with the original order and argv.
+func (d *distro) installPhases(pkgs []string) [][]string {
+	if d.installFirstPrefix == "" {
+		return [][]string{pkgs}
+	}
+	var first, rest []string
+	for _, pkg := range pkgs {
+		if strings.HasPrefix(pkg, d.installFirstPrefix) {
+			first = append(first, pkg)
+		} else {
+			rest = append(rest, pkg)
+		}
+	}
+	var phases [][]string
+	if len(first) > 0 {
+		phases = append(phases, first)
+	}
+	if len(rest) > 0 || len(phases) == 0 {
+		phases = append(phases, rest)
+	}
+	return phases
+}
+
 func (d *distro) removeArgs(pkgs []string) []string {
 	return append(append([]string{}, d.removeCmd...), pkgs...)
 }
 
 func (d *distro) installedPkg(pkg string) bool {
 	args := append(append([]string{}, d.queryCmd[1:]...), pkg)
-	out, err := exec.Command(d.queryCmd[0], args...).Output()
-	if err != nil {
-		return false
+	cmd := exec.Command(d.queryCmd[0], args...)
+	if d.id != "debian" {
+		return cmd.Run() == nil
 	}
-	if d.id == "debian" {
-		return strings.Contains(string(out), "install ok installed")
+	out, err := cmd.Output()
+	return err == nil && strings.Contains(string(out), "install ok installed")
+}
+
+func hostInit() initSystem {
+	switch os.Getenv("RYOKU_HOST_INIT") {
+	case "systemd":
+		return initSystemd
+	case "runit":
+		return initRunit
 	}
-	return true
+	fi, err := os.Stat("/run/systemd/system")
+	if err == nil && fi.IsDir() {
+		return initSystemd
+	}
+	return initRunit
+}
+
+func supportsInit(d *distro, init initSystem) bool {
+	return init == initSystemd || d != nil && d.id == "void" && init == initRunit
+}
+
+func supportedInitBooted(d *distro) bool {
+	return supportsInit(d, hostInit())
+}
+
+func (e *engine) usesRunit() bool {
+	return hostInit() == initRunit
 }
 
 // installed queries the detected distro. Replaces the old pacman-only helper.
@@ -257,12 +291,15 @@ func (e *engine) d() *distro {
 	return activeDistro
 }
 
-// ryokuBin finds the ryoku CLI: /usr/bin from a package, ~/.local/bin from a
-// fromSource build. Empty when it is not installed yet.
-func (e *engine) ryokuBin() string {
-	cands := []string{"/usr/bin/ryoku"}
+var ryokuSystemBin = "/usr/bin"
+
+// ryokuTool finds a Ryoku-built program: /usr/bin from a package, ~/.local/bin
+// from a fromSource build (which a fresh login's PATH does not carry). Empty
+// when it is not installed yet.
+func (e *engine) ryokuTool(name string) string {
+	cands := []string{filepath.Join(ryokuSystemBin, name)}
 	if e.f != nil && e.f.homeDir != "" {
-		cands = append(cands, filepath.Join(e.f.homeDir, ".local", "bin", "ryoku"))
+		cands = append(cands, filepath.Join(e.f.homeDir, ".local", "bin", name))
 	}
 	for _, c := range cands {
 		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
@@ -271,6 +308,8 @@ func (e *engine) ryokuBin() string {
 	}
 	return ""
 }
+
+func (e *engine) ryokuBin() string { return e.ryokuTool("ryoku") }
 
 // detectHostDistro resolves the distro from /etc/os-release and latches it, so
 // the preflight gate and the later detection pass agree. RYOKU_FORCE_DISTRO

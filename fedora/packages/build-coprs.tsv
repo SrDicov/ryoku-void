@@ -1,0 +1,2 @@
+copr	includepkgs	why
+sdegler/hyprland	aquamarine aquamarine-devel glaze-devel hyprcursor hyprcursor-devel hyprgraphics hyprgraphics-devel hypridle hyprland hyprland-devel hyprland-guiutils hyprland-protocols-devel hyprland-qt-support hyprland-uwsm hyprlang hyprlang-devel hyprpicker hyprpolkitagent hyprsunset hyprtoolkit hyprutils hyprutils-devel hyprwayland-scanner-devel hyprwire hyprwire-devel uwsm xdg-desktop-portal-hyprland	Hyprland plugins compile against the compositor, its runtime libraries and every public ABI dependency exposed by its headers.

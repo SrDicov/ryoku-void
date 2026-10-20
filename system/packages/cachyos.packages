@@ -1,18 +1,22 @@
 # CachyOS layer. Installed by pacstrap on every target, on top of base.packages,
-# so a Ryoku install IS a CachyOS install: the CachyOS-optimized kernel, the
-# system performance tuning, the auto-nice daemon, the sched-ext schedulers, and
-# the CachyOS Proton build. One package per line; '#' and blank lines are ignored.
+# so a Ryoku install IS a CachyOS install: the set CachyOS's own installer lays
+# ("CachyOS required" and "CachyOS Packages" in cachyos-calamares netinstall),
+# the system performance tuning, the auto-nice daemon, the sched-ext schedulers,
+# and the CachyOS Proton build. One package per line; '#' and blank lines are
+# ignored. The base.packages names this layer replaces are in cachyos.replaces.
 #
-# These live in the CachyOS repositories (added to the target's pacman.conf above
-# [core] by the installer, mirroring system/extras/ryoku-pkg-cachyos). The offline
-# ISO bakes them into the [offline] file:// repo so the whole set installs with no
-# network (installation/iso/build.sh, offline-repo.sh).
+# These live in the CachyOS repositories (written into the target's pacman.conf
+# by installation/backend/lib/cachyos.sh). The offline ISO bakes them into the
+# [offline] file:// repo so the whole set installs with no network
+# (installation/iso/build.sh, offline-repo.sh).
 
-# CachyOS-optimized kernel (sched-ext / BORE) + its headers for DKMS. The stock
-# `linux` kernel stays in base.packages as a fallback; the bootloader boots this
-# one by default (installation/backend/lib/bootloader.sh).
+# CachyOS-optimized kernel (sched-ext / BORE) + its headers for DKMS, and the
+# CachyOS LTS kernel as the fallback, the pair CachyOS installs. The bootloader
+# boots linux-cachyos by default (installation/backend/lib/bootloader.sh).
 linux-cachyos
 linux-cachyos-headers
+linux-cachyos-lts
+linux-cachyos-lts-headers
 
 # Trust + mirror packages so the installed system updates from CachyOS. Installed
 # here so `pacman-key --populate cachyos` can trust the repo offline (no keyserver
@@ -21,10 +25,35 @@ cachyos-keyring
 cachyos-mirrorlist
 cachyos-v3-mirrorlist
 cachyos-v4-mirrorlist
+# ranks both the Arch and the CachyOS mirrorlists (cachyos-rate-mirrors).
+cachyos-rate-mirrors
+
+# The AUR helper, from [cachyos] in place of the AUR's yay-bin (cachyos.replaces).
+yay
+
+# zlib-ng's drop-in builds, which CachyOS marks as replacing zlib and lib32-zlib.
+# A dependency resolves by name, so without these the install gets plain zlib and
+# the first -Syu asks the user to swap it; named here, they satisfy every zlib
+# dependency and that prompt never comes.
+zlib-ng-compat
+lib32-zlib-ng-compat
+
+# CachyOS's pacman hooks and its hardware detection tool (chwd), which the rest
+# of the CachyOS tooling expects to find on a CachyOS box.
+cachyos-hooks
+chwd
 
 # The CachyOS performance layer: sysctl, udev, modprobe, and systemd tuning that
-# makes the desktop (Hyprland) and games run the CachyOS way.
+# makes the desktop (Hyprland) and games run the CachyOS way. It also brings
+# zram swap (zram-generator), which is why this edition's installer defaults to
+# no swap partition, as CachyOS's does.
 cachyos-settings
+
+# CachyOS's own kernel manager and package installer apps, and the snapshot GUI
+# CachyOS installs alongside limine-snapper-sync.
+cachyos-kernel-manager
+cachyos-packageinstaller
+btrfs-assistant
 
 # Auto-nice daemon + CachyOS's ruleset: reprioritizes processes so the compositor
 # and foreground apps stay responsive under load.

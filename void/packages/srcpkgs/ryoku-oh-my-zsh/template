@@ -1,0 +1,23 @@
+# Template file for 'ryoku-oh-my-zsh'
+pkgname=ryoku-oh-my-zsh
+version=0.1.0
+revision=1
+_commit=4b657407c98bbc8830ae66c2ac7ff3d737c55a83
+wrksrc="ohmyzsh-${_commit}"
+depends="zsh"
+short_desc="Oh My Zsh framework for the Ryoku Zsh integration"
+maintainer="Ryoku <releases@ryoku.dev>"
+license="MIT"
+homepage="https://github.com/ohmyzsh/ohmyzsh"
+distfiles="${homepage}/archive/${_commit}.tar.gz"
+checksum=0cfb8057b7d7b1985f4390280ddedd5c9d00917b8bf2ba8e6774a08829786c8c
+provides="oh-my-zsh-${version}_${revision} oh-my-zsh-git-${version}_${revision}"
+conflicts="oh-my-zsh>=0 oh-my-zsh-git>=0"
+replaces="oh-my-zsh>=0 oh-my-zsh-git>=0"
+
+# Ryoku disables Oh My Zsh's self-updater; XBPS owns this tree.
+do_install() {
+	vmkdir usr/share/oh-my-zsh
+	vcopy . usr/share/oh-my-zsh
+	vlicense LICENSE.txt
+}

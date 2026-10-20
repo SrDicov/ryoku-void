@@ -597,8 +597,11 @@ func (d *daemon) matugenApply(img string) error {
 	}
 
 	// Fan the same palette into the app suite through matugen's templating pass,
-	// gated by the per-app roster and the app-suite toggle.
-	matugenRenderTemplates(matugenShellPalette(pal), readMatugenKnobs())
+	// gated by the per-app roster and the app-suite toggle. Nomarchy's generated
+	// theme is published only after the template pass completes.
+	if matugenRenderTemplates(matugenShellPalette(pal), readMatugenKnobs(), true) {
+		refreshNomarchyWallpaperTheme()
+	}
 
 	// Toolkit nudges so running apps re-read the regenerated configs. Hyprland is
 	// reloaded by the caller (paintWorker).
@@ -691,7 +694,7 @@ func (d *daemon) matugenApplyStatic(name string) error {
 		return fmt.Errorf("matugen colors.json (static): %w", err)
 	}
 	k := readMatugenKnobs()
-	matugenRenderTemplates(matugenShellPalette(shell), k)
+	matugenRenderTemplates(matugenShellPalette(shell), k, false)
 	matugenReload(staticPaletteMode(shell))
 	// A catalog theme has no ramps, so the last wallpaper's are now wrong. The
 	// file's absence is the gate: Ink re-lights the theme's own roles instead.
@@ -1138,23 +1141,28 @@ func filterMatugenConfig(toml string, enabled func(group string) bool) string {
 }
 
 // matugenRenderTemplates fans the palette into the deployed templates. The core
-// surface (config.toml: kitty, the Hyprland border, btop, Qt) always themes,
+// surface (config.toml: kitty, the window frame, btop, Qt) always themes,
 // per-app roster gated. The GTK / GUI-app suite (apps.toml) themes only when the
 // app-suite toggle is on; off blanks the GTK stylesheets so those apps fall back
-// to stock.
-func matugenRenderTemplates(shell map[string]string, k matugenKnobs) {
+// to stock. includeNomarchy is false for fixed Ryoku schemes: Nomarchy's
+// Wallpaper theme follows wallpaper generation, not Ryoku's independent scheme
+// picker.
+func matugenRenderTemplates(shell map[string]string, k matugenKnobs, includeNomarchy bool) bool {
 	dir := matugenTemplateDir()
 	matugenEnsureDirs()
 	carrierPath := filepath.Join(matugenCacheHome(), "ryoku", "matugen-carrier.json")
 	if err := writeJSONFile(carrierPath, matugenCarrier(shell)); err != nil {
 		fmt.Fprintf(os.Stderr, "matugen carrier: %v\n", err)
-		return
+		return false
 	}
 	// A roster key the user explicitly turned off stays off; a group ABSENT from
 	// their roster is one that shipped after they last saved it, and defaults on.
 	// Absent-means-off would have kept every app added from here on dark for
 	// everyone who had ever opened the appearance page.
 	enabled := func(group string) bool {
+		if group == "nomarchy" {
+			return includeNomarchy
+		}
 		if group == "steam" && !steamThemeReady() {
 			return false
 		}
@@ -1163,7 +1171,7 @@ func matugenRenderTemplates(shell map[string]string, k matugenKnobs) {
 		}
 		return true
 	}
-	matugenRenderFiltered(filepath.Join(dir, "config.toml"), carrierPath, enabled)
+	coreRendered := matugenRenderFiltered(filepath.Join(dir, "config.toml"), carrierPath, enabled)
 	// Two switches gate the app suite and both have to agree: the appearance
 	// page's per-group roster (themeRyokuApps) and the master "Theme apps" in
 	// theme.json. The Hub blanks the stylesheets when the master goes off, so
@@ -1180,6 +1188,7 @@ func matugenRenderTemplates(shell map[string]string, k matugenKnobs) {
 	} else {
 		blankGtk(matugenConfigHome())
 	}
+	return coreRendered
 }
 
 // nudgeObsidian re-links the palette snippet inside every registered Obsidian
@@ -1232,26 +1241,60 @@ func nudgeObsidian() {
 // matugenRenderFiltered renders one matugen config with only its roster-enabled
 // template blocks. The filtered config is staged in the cache so the shipped
 // template map stays the single source of the destinations and post_hooks.
-func matugenRenderFiltered(config, carrier string, enabled func(group string) bool) {
+func matugenRenderFiltered(config, carrier string, enabled func(group string) bool) bool {
 	b, err := os.ReadFile(config)
 	if err != nil {
-		return
+		return false
 	}
 	active := filepath.Join(matugenCacheHome(), "ryoku", "active-"+filepath.Base(config))
 	if err := os.WriteFile(active, []byte(filterMatugenConfig(string(b), enabled)), 0o644); err != nil {
-		return
+		return false
 	}
-	matugenRender(active, carrier)
+	return matugenRender(active, carrier)
 }
 
 // matugenRender runs one templating pass over a config, logging matugen's own
 // output on failure. A missing config is skipped, not an error.
-func matugenRender(config, carrier string) {
+func matugenRender(config, carrier string) bool {
 	if _, err := os.Stat(config); err != nil {
-		return
+		return false
 	}
 	if out, err := exec.Command("matugen", "-c", config, "json", carrier).CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "matugen render %s: %v: %s\n", filepath.Base(config), err, strings.TrimSpace(string(out)))
+		return false
+	}
+	return true
+}
+
+func refreshNomarchyWallpaperTheme() {
+	choice := ""
+	for _, path := range []string{
+		filepath.Join(matugenConfigHome(), "omarchy", "current-theme"),
+		filepath.Join(matugenStateHome(), "omarchy", "current", "theme.name"),
+	} {
+		if data, err := os.ReadFile(path); err == nil {
+			choice = strings.TrimSpace(string(data))
+			if choice != "" {
+				break
+			}
+		}
+	}
+	if choice != "" && choice != "ryoku" {
+		return
+	}
+
+	root := os.Getenv("OMARCHY_PATH")
+	if root == "" {
+		root = filepath.Join(matugenDataHome(), "ryoku", "nomarchy")
+	}
+	helper := filepath.Join(root, "bin", "omarchy-theme-set")
+	if info, err := os.Stat(helper); err != nil || info.IsDir() {
+		return
+	}
+	cmd := exec.Command(helper, "ryoku")
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "nomarchy wallpaper theme: %v\n", err)
 	}
 }
 
@@ -1603,17 +1646,19 @@ func matugenThemeSig(frame []byte) string {
 	return doc.Theme.Theme
 }
 
-// fontSig fingerprints the frame's system-font key, so a change to it re-applies
-// the font to the toolkits the same way a theme change retunes them.
+// fontSig fingerprints the frame's UI and terminal font keys, so a change to
+// either one re-applies the fonts to the toolkits the same way a theme change
+// retunes them.
 func fontSig(frame []byte) string {
 	var doc struct {
-		FontFamily string  `json:"fontFamily"`
-		FontSize   float64 `json:"fontSize"`
+		FontFamily         string  `json:"fontFamily"`
+		TerminalFontFamily string  `json:"terminalFontFamily"`
+		FontSize           float64 `json:"fontSize"`
 	}
 	if json.Unmarshal(frame, &doc) != nil {
 		return ""
 	}
-	return doc.FontFamily + "\x1f" + strconv.FormatFloat(doc.FontSize, 'f', -1, 64)
+	return doc.FontFamily + "\x1f" + doc.TerminalFontFamily + "\x1f" + strconv.FormatFloat(doc.FontSize, 'f', -1, 64)
 }
 
 // applyFont pushes the chosen fonts to the toolkits without a logout: gsettings
@@ -1631,20 +1676,20 @@ func applyFont(frame []byte) {
 	_ = runCommand("pkill", "-USR1", "-x", "kitty")
 }
 
-// fontChoice resolves the system font (family), the monospace face that follows
-// it, and the base size, each with a shipped fallback. One key drives both: an
-// empty family keeps the proportional UI default and a monospace terminal one.
+// fontChoice resolves the UI and terminal families independently, with the
+// shipped proportional and monospace faces as their respective fallbacks.
 func fontChoice(frame []byte) (family, mono string, size int) {
 	var doc struct {
-		FontFamily string  `json:"fontFamily"`
-		FontSize   float64 `json:"fontSize"`
+		FontFamily         string  `json:"fontFamily"`
+		TerminalFontFamily string  `json:"terminalFontFamily"`
+		FontSize           float64 `json:"fontSize"`
 	}
 	_ = json.Unmarshal(frame, &doc)
 	if family = strings.TrimSpace(doc.FontFamily); family == "" {
 		family = "Space Grotesk"
-		mono = "SpaceMono Nerd Font"
-	} else {
-		mono = family
+	}
+	if mono = strings.TrimSpace(doc.TerminalFontFamily); mono == "" {
+		mono = "JetBrainsMono Nerd Font"
 	}
 	if size = int(doc.FontSize); size <= 0 {
 		size = 11
@@ -1766,6 +1811,13 @@ func matugenDataHome() string {
 		return d
 	}
 	return filepath.Join(os.Getenv("HOME"), ".local", "share")
+}
+
+func matugenStateHome() string {
+	if d := os.Getenv("XDG_STATE_HOME"); d != "" {
+		return d
+	}
+	return filepath.Join(os.Getenv("HOME"), ".local", "state")
 }
 
 func matugenTemplateDir() string { return filepath.Join(matugenConfigHome(), "matugen") }

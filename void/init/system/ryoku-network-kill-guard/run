@@ -1,0 +1,13 @@
+#!/bin/sh
+# Runit cannot order this before NetworkManager; the fast oneshot limits the race.
+exec 2>&1
+
+. "${RYOKU_INIT_LIB:-/usr/lib/ryoku/runit}/wait-for"
+load_session_env
+
+[ -e /var/lib/ryoku/network-kill-switch.enabled ] || exec sv down .
+
+/usr/bin/ryoku-network-kill boot || true
+
+# Park the completed oneshot; runsv would otherwise restart it.
+exec sv down .

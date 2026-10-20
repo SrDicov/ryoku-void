@@ -5,7 +5,11 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-root="$here/.."
+# shellcheck source=tests/install-dryrun-harness.sh
+source "$here/install-dryrun-harness.sh"
+root=$INSTALL_DRYRUN_ROOT
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 # The installer refuses to run without a compositor choice and the config dir
@@ -13,18 +17,19 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 # paths, so that is the one it installs.
 export RYOKU_COMPOSITOR="${RYOKU_COMPOSITOR:-hyprland}"
 export RYOKU_COMPOSITOR_CONFIG_DIR="${RYOKU_COMPOSITOR_CONFIG_DIR:-hypr}"
+export RYOKU_COMPOSITOR_GPU_PIN="${RYOKU_COMPOSITOR_GPU_PIN:-gpu.lua}"
 
 canonical="partition filesystems mount pacstrap configure bootloader"
 
 # run_backend <strategy> <encrypt> <swap> [esp-mode] [variant]
 run_backend() {
+  local output=$tmp/arch.out
   rc=0
-  out="$(RYOKU_DRYRUN=1 RYOKU_REPO="$root" \
-    RYOKU_DISK=/dev/vda RYOKU_PASSWORD_HASH='$6$fake$hash' \
+  install_dryrun_run arch "$output" \
     RYOKU_DISK_STRATEGY="$1" RYOKU_ENCRYPT="$2" RYOKU_SWAP_GIB="$3" \
     RYOKU_ESP_MODE="${4:-auto}" RYOKU_VARIANT="${5:-plain}" \
-    RYOKU_LUKS_PASSPHRASE=passphrase \
-    bash "$root/installation/backend/ryoku-install" 2>&1)" || rc=$?
+    RYOKU_LUKS_PASSPHRASE=passphrase || rc=$?
+  out=$(<"$output")
 }
 
 for strategy in whole alongside; do
@@ -111,4 +116,191 @@ out="$(RYOKU_DRYRUN=1 RYOKU_REPO="$root" RYOKU_DISK=/dev/vda \
   bash "$root/installation/backend/ryoku-install" 2>&1)" || fail "no-gpu-mode dry run exited nonzero: $out"
 grep -qF 'ryoku-gpu mode' <<<"$out" && fail "ryoku-gpu mode narrated when RYOKU_GPU_MODE was unset"
 
+
+# Browser, login-shell, and app-choice wiring. Direct backend calls use the same
+# Firefox/Fish defaults as the TUI, and every losing package reaches both the
+# package filters and the provisioning ledger.
+pcount() {
+  grep -oE 'installing [0-9]+ packages' <<<"$1" | grep -oE '[0-9]+' | head -1
+}
+out="$(RYOKU_DRYRUN=1 RYOKU_REPO="$root" RYOKU_DISK=/dev/vda \
+  RYOKU_PASSWORD_HASH='$6$fake$hash' RYOKU_DISK_STRATEGY=whole \
+  bash "$root/installation/backend/ryoku-install" 2>&1)" || fail "default product-choice dry run exited nonzero: $out"
+grep -qF 'DRYRUN: set firefox as the default web browser' <<<"$out" \
+  || fail "the empty browser choice did not default to firefox"
+grep -qF 'useradd -m -G wheel,video,input -s /usr/bin/fish ryoku' <<<"$out" \
+  || fail "the empty login-shell choice did not create the user with fish"
+grep -qF 'DRYRUN: write /mnt/home/ryoku/.local/state/ryoku/default-rice-pending:' <<<"$out" \
+  || fail "the first-boot default-rice marker write was not narrated"
+grep -qF '        | default' <<<"$out" \
+  || fail "the first-boot default-rice marker did not contain default"
+grep -qF 'DRYRUN: set nautilus as the default file manager (inode/directory + desktop.apps.files)' <<<"$out" \
+  || fail "the empty file-manager choice did not default to nautilus"
+grep -qF 'ryoku-rashin ryotunes ryomanager nautilus nautilus-python' <<<"$out" \
+  || fail "fresh-install app and file-manager packages were not in the desktop transaction"
+grep -qF 'DRYRUN: write /mnt/home/ryoku/.local/state/ryoku/rashin-setup-pending:' <<<"$out" \
+  || fail "the first-login Rashin setup marker write was not narrated"
+base_n=$(pcount "$out")
+[[ -n $base_n ]] || fail "no pacstrap package count in the default dry run"
+
+out="$(RYOKU_DRYRUN=1 RYOKU_REPO="$root" RYOKU_DISK=/dev/vda \
+  RYOKU_PASSWORD_HASH='$6$fake$hash' RYOKU_DISK_STRATEGY=whole \
+  RYOKU_BROWSER=chromium RYOKU_LOGIN_SHELL=zsh \
+  bash "$root/installation/backend/ryoku-install" 2>&1)" || fail "chromium/zsh dry run exited nonzero: $out"
+grep -qF 'DRYRUN: set chromium as the default web browser' <<<"$out" \
+  || fail "RYOKU_BROWSER=chromium did not narrate chromium"
+grep -qF 'useradd -m -G wheel,video,input -s /usr/bin/zsh ryoku' <<<"$out" \
+  || fail "RYOKU_LOGIN_SHELL=zsh did not reach useradd"
+ledger="$(grep -F 'DRYRUN: seed /mnt/home/ryoku/.local/state/ryoku/provisioned with the dropped packages' <<<"$out" | tail -n1)"
+[[ -n $ledger ]] || fail "the drop list did not narrate provisioning-ledger seeding"
+ledger_pkgs="${ledger##*packages (}"
+ledger_pkgs="${ledger_pkgs%)}"
+for pkg in firefox zen-browser-bin fish blesh; do
+  [[ " $ledger_pkgs " == *" $pkg "* ]] || fail "chromium/zsh ledger is missing $pkg: $ledger"
+done
+for pkg in chromium zsh zsh-autosuggestions zsh-history-substring-search zsh-syntax-highlighting ryoku-oh-my-zsh; do
+  [[ " $ledger_pkgs " != *" $pkg "* ]] || fail "chromium/zsh ledger drops selected package $pkg: $ledger"
+done
+
+for shell in fish zsh bash; do
+  out="$(RYOKU_DRYRUN=1 RYOKU_REPO="$root" RYOKU_DISK=/dev/vda \
+    RYOKU_PASSWORD_HASH='$6$fake$hash' RYOKU_DISK_STRATEGY=whole RYOKU_LOGIN_SHELL="$shell" \
+    bash "$root/installation/backend/ryoku-install" 2>&1)" || fail "$shell dry run exited nonzero: $out"
+  grep -qF "useradd -m -G wheel,video,input -s /usr/bin/$shell ryoku" <<<"$out" \
+    || fail "$shell did not reach useradd"
+done
+
+# Dropping two base-set apps removes exactly two packages from the transaction.
+out="$(RYOKU_DRYRUN=1 RYOKU_REPO="$root" RYOKU_DISK=/dev/vda \
+  RYOKU_PASSWORD_HASH='$6$fake$hash' RYOKU_DISK_STRATEGY=whole RYOKU_DROP_PACKAGES=docker,flatpak \
+  bash "$root/installation/backend/ryoku-install" 2>&1)" || fail "drop dry run exited nonzero: $out"
+drop_n=$(pcount "$out")
+[[ $drop_n -eq $((base_n - 2)) ]] \
+  || fail "RYOKU_DROP_PACKAGES=docker,flatpak did not remove exactly 2 packages ($base_n -> $drop_n)"
+
+# Unknown choices are refused before anything runs.
+out="$(RYOKU_DRYRUN=1 RYOKU_REPO="$root" RYOKU_DISK=/dev/vda \
+  RYOKU_PASSWORD_HASH='$6$fake$hash' RYOKU_DISK_STRATEGY=whole RYOKU_BROWSER=brave \
+  bash "$root/installation/backend/ryoku-install" 2>&1)" && fail "RYOKU_BROWSER=brave was accepted"
+grep -qF 'not one of the shipped browsers' <<<"$out" \
+  || fail "the browser gate did not explain the allowed values"
+out="$(RYOKU_DRYRUN=1 RYOKU_REPO="$root" RYOKU_DISK=/dev/vda \
+  RYOKU_PASSWORD_HASH='$6$fake$hash' RYOKU_DISK_STRATEGY=whole RYOKU_LOGIN_SHELL=nu \
+  bash "$root/installation/backend/ryoku-install" 2>&1)" && fail "RYOKU_LOGIN_SHELL=nu was accepted"
+grep -qF 'not one of the shipped login shells' <<<"$out" \
+  || fail "the login-shell gate did not explain the allowed values"
+
+# File manager, hidden launcher, and optional Rashin decisions share the drop
+# ledger with the existing browser and login-shell choices.
+out="$(RYOKU_DRYRUN=1 RYOKU_REPO="$root" RYOKU_DISK=/dev/vda \
+  RYOKU_PASSWORD_HASH='$6$fake$hash' RYOKU_DISK_STRATEGY=whole \
+  RYOKU_FILE_MANAGER=dolphin RYOKU_RASHIN=0 \
+  RYOKU_HIDE_APPS=ryovm.desktop,ryotunes.desktop \
+  bash "$root/installation/backend/ryoku-install" 2>&1)" \
+  || fail "file-manager/app-choice dry run exited nonzero: $out"
+grep -qF 'DRYRUN: set dolphin as the default file manager (inode/directory + desktop.apps.files)' <<<"$out" \
+  || fail "RYOKU_FILE_MANAGER=dolphin did not reach the files role"
+grep -qF 'ryomanager dolphin' <<<"$out" \
+  || fail "dolphin and the default apps were not in the desktop transaction"
+grep -qF '/home/ryoku/.local/share/applications/ryovm.desktop' <<<"$out" \
+  || fail "ryovm.desktop hidden entry was not narrated"
+grep -qF '/home/ryoku/.local/share/applications/ryotunes.desktop' <<<"$out" \
+  || fail "ryotunes.desktop hidden entry was not narrated"
+grep -qF '        | [Desktop Entry]' <<<"$out" \
+  || fail "hidden desktop entry did not contain a Desktop Entry section"
+grep -qF '        | Hidden=true' <<<"$out" \
+  || fail "hidden desktop entry did not set Hidden=true"
+grep -qF 'DRYRUN: write /mnt/home/ryoku/.local/state/ryoku/rashin-setup-pending:' <<<"$out" \
+  && fail "RYOKU_RASHIN=0 wrote the Rashin setup marker"
+ledger="$(grep -F 'DRYRUN: seed /mnt/home/ryoku/.local/state/ryoku/provisioned with the dropped packages' <<<"$out" | tail -n1)"
+ledger=${ledger//[()]/ }
+for pkg in nautilus nautilus-python thunar ryoku-rashin; do
+  [[ " $ledger " == *" $pkg "* ]] || fail "dolphin/Rashin-off ledger is missing $pkg: $ledger"
+done
+[[ " $ledger " != *" dolphin "* ]] || fail "dolphin/Rashin-off ledger drops selected dolphin: $ledger"
+
+out="$(RYOKU_DRYRUN=1 RYOKU_REPO="$root" RYOKU_DISK=/dev/vda \
+  RYOKU_PASSWORD_HASH='$6$fake$hash' RYOKU_DISK_STRATEGY=whole RYOKU_FILE_MANAGER=pcmanfm \
+  bash "$root/installation/backend/ryoku-install" 2>&1)" && fail "unknown file manager was accepted"
+grep -qF 'not one of the shipped file managers' <<<"$out" \
+  || fail "the file-manager gate did not explain the allowed values"
+out="$(RYOKU_DRYRUN=1 RYOKU_REPO="$root" RYOKU_DISK=/dev/vda \
+  RYOKU_PASSWORD_HASH='$6$fake$hash' RYOKU_DISK_STRATEGY=whole RYOKU_HIDE_APPS=../bad.desktop \
+  bash "$root/installation/backend/ryoku-install" 2>&1)" && fail "path-like hidden desktop id was accepted"
+grep -qF 'use plain *.desktop file names' <<<"$out" \
+  || fail "the hidden-app gate did not explain the required desktop id form"
+for bad_env in RYOKU_RASHIN RYOKU_CACHYOS_LAYER; do
+  out="$(env RYOKU_DRYRUN=1 RYOKU_REPO="$root" RYOKU_DISK=/dev/vda \
+    RYOKU_PASSWORD_HASH='$6$fake$hash' RYOKU_DISK_STRATEGY=whole "$bad_env"=yes \
+    bash "$root/installation/backend/ryoku-install" 2>&1)" && fail "$bad_env=yes was accepted"
+  grep -qF "$bad_env must be 0 or 1" <<<"$out" \
+    || fail "$bad_env gate did not explain its allowed values"
+done
+
+# The optional CachyOS layer is plain-only and needs a reachable CachyOS mirror,
+# but an offline-base install still completes when the layer cannot be fetched.
+# Its packages are upgraded as one transaction and stock linux stays available.
+mkdir -p "$tmp/offline-repo"
+: >"$tmp/offline-repo/offline.db"
+out="$(RYOKU_DRYRUN=1 RYOKU_REPO="$root" RYOKU_DISK=/dev/vda \
+  RYOKU_PASSWORD_HASH='$6$fake$hash' RYOKU_DISK_STRATEGY=whole \
+  RYOKU_CACHYOS_LAYER=1 RYOKU_ONLINE=0 RYOKU_OFFLINE_REPO="$tmp/offline-repo" \
+  bash "$root/installation/backend/ryoku-install" 2>&1)" \
+  || fail "offline-base CachyOS layer dry run exited nonzero: $out"
+grep -qF 'check the target CPU for x86-64-v3 and the CachyOS mirror for reachability' <<<"$out" \
+  || fail "offline-base CachyOS layer did not narrate its reachability check"
+grep -qF 'run pacman -Syu for linux-cachyos' <<<"$out" \
+  || fail "offline-base CachyOS layer did not narrate its full-upgrade transaction"
+out="$(RYOKU_DRYRUN=1 RYOKU_REPO="$root" RYOKU_DISK=/dev/vda \
+  RYOKU_PASSWORD_HASH='$6$fake$hash' RYOKU_DISK_STRATEGY=whole \
+  RYOKU_CACHYOS_LAYER=1 RYOKU_ONLINE=1 \
+  bash "$root/installation/backend/ryoku-install" 2>&1)" \
+  || fail "plain online CachyOS layer dry run exited nonzero: $out"
+grep -qF 'enable [cachyos-v3] and multilib with the shipped helpers' <<<"$out" \
+  || fail "plain CachyOS layer did not narrate repository setup"
+grep -qF 'linux-cachyos linux-cachyos-headers cachyos-settings' <<<"$out" \
+  || fail "plain CachyOS layer did not narrate its package set"
+grep -qF '/CachyOS Linux' <<<"$out" \
+  || fail "plain CachyOS layer did not add the CachyOS kernel boot entry"
+
+# Void applies the same file-manager/apps/hidden-marker/Rashin contract and
+# ignores the CachyOS-only switch.
+void_out=$tmp/void.out
+install_dryrun_run void "$void_out" \
+  RYOKU_DISK_STRATEGY=whole RYOKU_FIRMWARE_MODE=uefi \
+  RYOKU_COMPOSITOR=niri RYOKU_COMPOSITOR_CONFIG_DIR=niri \
+  RYOKU_COMPOSITOR_GPU_PIN=gpu.kdl RYOKU_FILE_MANAGER=thunar \
+  RYOKU_RASHIN=0 RYOKU_CACHYOS_LAYER=1 RYOKU_HIDE_APPS=ryovm.desktop \
+  || fail "Void install-choice dry run exited nonzero: $(<"$void_out")"
+out=$(<"$void_out")
+grep -qF 'CachyOS layer is not available on Void' <<<"$out" \
+  || fail "Void did not ignore the CachyOS layer"
+grep -qF 'DRYRUN: set thunar as the default file manager (inode/directory + desktop.apps.files)' <<<"$out" \
+  || fail "Void did not set the selected file-manager role"
+grep -qF 'ryotunes' <<<"$out" && grep -qF 'ryomanager' <<<"$out" && grep -qF 'Thunar' <<<"$out" \
+  || fail "Void desktop transaction missed ryotunes, ryomanager, or Thunar"
+grep -qF '/home/ryoku/.local/share/applications/ryovm.desktop' <<<"$out" \
+  || fail "Void did not narrate the hidden Ryoport launcher"
+transactions=$(grep -F 'xbps-install -r /mnt' <<<"$out")
+grep -qw 'ryoku-rashin' <<<"$transactions" \
+  && fail "Void installed ryoku-rashin with RYOKU_RASHIN=0"
+ledger="$(grep -F 'DRYRUN: seed /mnt/home/ryoku/.local/state/ryoku/provisioned with the dropped packages' <<<"$out" | tail -n1)"
+[[ " ${ledger//[()]/ } " == *" ryoku-rashin "* ]] || fail "Void Rashin-off ledger is missing ryoku-rashin: $ledger"
+grep -qF 'DRYRUN: write /mnt/home/ryoku/.local/state/ryoku/rashin-setup-pending:' <<<"$out" \
+  && fail "Void RYOKU_RASHIN=0 wrote the Rashin setup marker"
+
+# Void's desktop package does not pull Rashin in; the installer names it.
+install_dryrun_run void "$void_out" \
+  RYOKU_DISK_STRATEGY=whole RYOKU_FIRMWARE_MODE=uefi \
+  RYOKU_COMPOSITOR=niri RYOKU_COMPOSITOR_CONFIG_DIR=niri \
+  RYOKU_COMPOSITOR_GPU_PIN=gpu.kdl \
+  || fail "Void default dry run exited nonzero: $(<"$void_out")"
+out=$(<"$void_out")
+transactions=$(grep -F 'xbps-install -r /mnt' <<<"$out")
+grep -qw 'ryoku-rashin' <<<"$transactions" \
+  || fail "Void did not install ryoku-rashin by default"
+grep -qF 'DRYRUN: write /mnt/home/ryoku/.local/state/ryoku/rashin-setup-pending:' <<<"$out" \
+  || fail "Void did not leave the Rashin first-login marker"
+
+echo "install-dryrun-matrix: browser/shell/app-choice checks passed"
 echo "install-dryrun-matrix: all checks passed"

@@ -1,0 +1,37 @@
+name: Screen Recorder
+
+# ryoku-cmd-record drives GPU Screen Recorder for every capture. A codec check
+# that refused machines GSR itself could record on (no hardware encoder, or a
+# GPU probe that failed) and failures that said nothing about why are what
+# tests/screen-recorder.sh pins, against a stand-in GSR.
+
+on:
+  pull_request:
+    paths:
+      - 'ryoku/shell/scripts/ryoku-cmd-record'
+      - 'tests/screen-recorder.sh'
+      - '.github/workflows/screen-recorder.yml'
+  push:
+    branches:
+      - main
+      - unstable-dev
+    paths:
+      - 'ryoku/shell/scripts/ryoku-cmd-record'
+      - 'tests/screen-recorder.sh'
+      - '.github/workflows/screen-recorder.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recorder:
+    name: Codec fallback, region target and failure reasons
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Recorder behaviour against a stand-in GSR
+        shell: bash
+        run: bash tests/screen-recorder.sh

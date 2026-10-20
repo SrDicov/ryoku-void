@@ -1,33 +1,17 @@
 name: i18n
 
-# Keep the per-language catalogs current without anyone editing them. When a
-# displayed string changes -- any .qml, a hub schema label/desc/group, a Go
-# i18n.T() call in an installer or the CLI, or a t/tf call in the installer's
-# shell -- this extracts the English source and translates ONLY the strings each
-# language is missing, then commits the result back. A developer writes English;
-# the rest is machine-filled here, and overrides/<lang>.json (human fixes) are
-# preserved.
+# Run this by hand from the Actions tab, or with
+# `gh workflow run i18n.yml --ref unstable-dev`, after English copy changes.
+# It extracts the English source, translates only the strings each language is
+# missing, and commits the result back. Human fixes in overrides/<lang>.json
+# are preserved.
 #
-# It commits to the branch that was pushed, so translations flow to main through
-# the normal fast-forward, never triggering a publish on their own.
+# This no longer runs on every push: each run used to spend up to 3.5 hours of
+# runner time, and a provider without credits would hang until it was cancelled.
+# The commit goes back to the branch the workflow was dispatched on, so
+# translations still flow to main through the normal fast-forward.
 
 on:
-  push:
-    branches:
-      - beta-18
-      - unstable-dev
-    paths:
-      - '**/*.qml'
-      - 'ryoku/hub/quickshell/schema/*.js'
-      - 'ryoku/i18n/**'
-      - 'installation/tui/*.go'
-      - 'installation/backend/**'
-      - 'ryoku-shell-installer/*.go'
-      - 'ryoku/cli/**/*.go'
-      - 'ryoku/shell/ipc/*.go'
-      - 'ryoku/hub/backend/*.go'
-      - 'ryoku/apps/ryostore/backend/*.go'
-      - '.github/workflows/i18n.yml'
   workflow_dispatch:
     inputs:
       force:
@@ -46,6 +30,7 @@ jobs:
   translate:
     name: Regenerate translations
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v4

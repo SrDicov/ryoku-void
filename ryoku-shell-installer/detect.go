@@ -5,7 +5,9 @@ package main
 // dry run and a real run see the same world.
 
 import (
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/user"
@@ -16,18 +18,20 @@ import (
 	"time"
 
 	"ryoku-i18n"
+	installerplan "ryoku-installerplan"
 )
 
 type facts struct {
-	distroID   string
-	distroLike string
-	distroName string
-	archX86    bool
-	pacman     bool
-	archLike   bool
-	distro     *distro
-	online     bool
-	btrfsRoot  bool
+	distroID    string
+	distroLike  string
+	distroName  string
+	archX86     bool
+	pacman      bool
+	archLike    bool
+	distro      *distro
+	online      bool
+	filteredDNS bool
+	btrfsRoot   bool
 
 	secureBoot  bool // SecureBoot=1 and SetupMode=0 in efivars
 	sbctlSigned bool // sbctl on PATH with a key store, signing hook likely works
@@ -52,7 +56,8 @@ type facts struct {
 	niriFound        bool
 	swayFound        bool         // sway config present; sway stays as a fallback session
 	desktops         []string     // installed desktop environments (kept, never removed)
-	kdeSddmConf      bool         // KDE's sddm-kcm drop-in owns /etc/sddm.conf.d
+	kdeSddmConf      bool         // KDE currently owns the effective SDDM theme
+	kdeSddmAdminConf bool         // KDE settings live in /etc/sddm.conf.d
 	monOutputs       []niriOutput // monitor intent salvaged from the old setup
 	monSource        string       // config the outputs came from (niri, GNOME, KDE, ...)
 	kbLayout         string
@@ -60,6 +65,7 @@ type facts struct {
 	kbOptions        string
 	kbSource         string // config the keyboard setup came from
 	userShell        string
+	fileManager      string
 	ryokuOnBox       bool // ryoku-desktop already installed
 	hostname         string
 	username         string
@@ -67,6 +73,30 @@ type facts struct {
 	hyprCfgDirs      []string  // pre-existing ~/.config/{hypr,quickshell,niri}
 	riceFound        []string  // known hyprland rices detected by marker paths
 	prevRun          *runState // interrupted earlier run, offered as a resume
+}
+
+var filteredDNSSinkholeV6 = netip.MustParsePrefix("2001:4188:2:600:10:10:34:0/112")
+
+func dnsAddressFiltered(ip net.IP) bool {
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	return address.IsPrivate() || address.IsLoopback() || filteredDNSSinkholeV6.Contains(address)
+}
+
+func ryokuDNSFiltered(lookup func(string) ([]net.IP, error)) bool {
+	addresses, err := lookup("repo.ryoku.dev")
+	if err != nil {
+		return false
+	}
+	for _, address := range addresses {
+		if dnsAddressFiltered(address) {
+			return true
+		}
+	}
+	return false
 }
 
 // rival quickshell stacks; ordered meta -> shell -> runtime so pacman removal
@@ -140,6 +170,21 @@ func has(name string) bool {
 	return err == nil
 }
 
+func installedFileManager() string {
+	for _, choice := range installerplan.Choices(installerplan.FileManager) {
+		if choice.Executable == "" {
+			continue
+		}
+		if info, err := os.Stat(choice.Executable); err == nil && !info.IsDir() {
+			return choice.ID
+		}
+		if _, err := exec.LookPath(filepath.Base(choice.Executable)); err == nil {
+			return choice.ID
+		}
+	}
+	return ""
+}
+
 func pacmanHas(pkg string) bool { return installed(pkg) }
 
 func unitEnabled(scope, unit string) bool {
@@ -182,6 +227,17 @@ func mirrorlistHasOmarchy(list string) bool {
 	return false
 }
 
+func kdeOwnsSDDMTheme(root, distroID string, desktops []string) bool {
+	if _, err := os.Stat(sddmPath(root, "/etc/sddm.conf.d/kde_settings.conf")); err == nil {
+		return true
+	}
+	if distroID != "fedora" || !hasDesktop(desktops, "KDE Plasma") {
+		return false
+	}
+	state := effectiveSDDMThemeAt(root, "01-breeze-fedora")
+	return state.current != "" && state.current != "ryoku"
+}
+
 // Omarchy 4 ships an alpm hook that aborts every `pacman -Syu` unless
 // OMARCHY_ALLOW_DIRECT_PACMAN is set, which stops this installer dead and would
 // keep blocking `ryoku update` after the conversion. Both hook directories are
@@ -210,16 +266,6 @@ func detect() *facts {
 		activeDistro = d
 		f.distro = d
 	}
-	// RYOKU_FORCE_DISTRO overrides the whole detection, so the step list, the
-	// package manager and the init wiring are all exercised for a distro that
-	// is not the one this machine boots. The only way to check the void lane
-	// from a runner that is not Void.
-	if id := strings.TrimSpace(os.Getenv("RYOKU_FORCE_DISTRO")); id != "" {
-		if d := detectDistro(id, ""); d != nil {
-			f.distroID, f.distroLike, f.distro = id, "", d
-			activeDistro = d
-		}
-	}
 
 	u, err := user.Current()
 	if err == nil {
@@ -231,12 +277,16 @@ func detect() *facts {
 	}
 	f.hostname, _ = os.Hostname()
 	f.userShell = os.Getenv("SHELL")
+	f.fileManager = installedFileManager()
 
 	// repo reachability probe; the install needs the network anyway.
-	client := &http.Client{Timeout: 6 * time.Second}
-	if resp, err := client.Head("https://repo.ryoku.dev/stable/x86_64/ryoku.db"); err == nil {
-		resp.Body.Close()
-		f.online = resp.StatusCode < 500
+	f.filteredDNS = ryokuDNSFiltered(net.LookupIP)
+	if !f.filteredDNS {
+		client := &http.Client{Timeout: 6 * time.Second}
+		if resp, err := client.Head("https://repo.ryoku.dev/stable/x86_64/ryoku.db"); err == nil {
+			resp.Body.Close()
+			f.online = resp.StatusCode < 500
+		}
 	}
 
 	var st syscall.Statfs_t
@@ -248,30 +298,38 @@ func detect() *facts {
 	f.detectUcode()
 	f.detectSecureBoot()
 
-	// enabled display manager: the display-manager.service alias symlink is
-	// authoritative on systemd; on runit the /var/service links are.
-	if tgt, err := os.Readlink("/etc/systemd/system/display-manager.service"); err == nil {
-		f.currentDM = filepath.Base(tgt)
-	} else if initSystem() == "runit" {
+	if f.distro != nil && hostInit() == initRunit {
 		for _, dm := range append([]string{"sddm.service"}, otherDMUnits...) {
-			if _, err := os.Lstat("/var/service/" + runitName(dm)); err == nil {
-				f.currentDM = dm
+			if runitServiceEnabled(runitServiceName(dm)) {
+				f.currentDM = runitServiceName(dm)
 				break
+			}
+		}
+		f.nmEnabled = runitServiceEnabled("NetworkManager")
+		for _, service := range []string{"dhcpcd", "wpa_supplicant"} {
+			if runitServiceEnabled(service) {
+				f.otherNet = append(f.otherNet, service)
 			}
 		}
 	} else {
-		for _, dm := range append([]string{"sddm.service"}, otherDMUnits...) {
-			if unitEnabled("system", dm) {
-				f.currentDM = dm
-				break
+		// enabled display manager: the display-manager.service alias symlink is
+		// authoritative; fall back to probing the known units.
+		if tgt, err := os.Readlink("/etc/systemd/system/display-manager.service"); err == nil {
+			f.currentDM = filepath.Base(tgt)
+		} else {
+			for _, dm := range append([]string{"sddm.service"}, otherDMUnits...) {
+				if unitEnabled("system", dm) {
+					f.currentDM = dm
+					break
+				}
 			}
 		}
-	}
 
-	f.nmEnabled = sysEnabled("NetworkManager.service")
-	for _, n := range otherNetUnits {
-		if sysEnabled(n) {
-			f.otherNet = append(f.otherNet, n)
+		f.nmEnabled = unitEnabled("system", "NetworkManager.service")
+		for _, n := range otherNetUnits {
+			if unitEnabled("system", n) {
+				f.otherNet = append(f.otherNet, n)
+			}
 		}
 	}
 
@@ -282,20 +340,17 @@ func detect() *facts {
 		}
 	}
 
-	if f.pacman || (f.distro != nil && f.distro.id == "void") {
+	if f.pacman {
 		for _, p := range rivalShellPkgs {
 			if pacmanHas(p) {
 				f.rivalPkgs = append(f.rivalPkgs, p)
 			}
 		}
 		// end-4's meta packages pull the whole illogical-impulse daemon zoo;
-		// plain -R removal, same reasoning as the noctalia metas. Arch only:
-		// the query below is pacman-specific.
-		if f.pacman {
-			for _, p := range strings.Fields(out("pacman", "-Qq")) {
-				if strings.HasPrefix(p, "illogical-impulse-") {
-					f.rivalPkgs = append(f.rivalPkgs, p)
-				}
+		// plain -R removal, same reasoning as the noctalia metas.
+		for _, p := range strings.Fields(out("pacman", "-Qq")) {
+			if strings.HasPrefix(p, "illogical-impulse-") {
+				f.rivalPkgs = append(f.rivalPkgs, p)
 			}
 		}
 		for _, p := range conflictBlockerPkgs {
@@ -312,9 +367,14 @@ func detect() *facts {
 		f.niriFound = pacmanHas("niri")
 		f.desktops = detectDesktops()
 	}
-	if _, err := os.Stat("/etc/sddm.conf.d/kde_settings.conf"); err == nil {
-		f.kdeSddmConf = true
+	if f.distro != nil && f.distro.id == "fedora" {
+		f.ryokuOnBox = f.distro.installedPkg("ryoku-desktop")
+		f.niriFound = f.distro.installedPkg("niri")
+		f.desktops = detectDesktops()
 	}
+	_, err = os.Stat("/etc/sddm.conf.d/kde_settings.conf")
+	f.kdeSddmAdminConf = err == nil
+	f.kdeSddmConf = kdeOwnsSDDMTheme("/", f.distroID, f.desktops)
 
 	// an ex-Omarchy box keeps the [omarchy] repo and, worse, Omarchy's own
 	// mirror for core/extra; a converted machine must depend on neither.
@@ -327,14 +387,14 @@ func detect() *facts {
 	f.omarchyGuards = findOmarchyGuards()
 
 	for _, unit := range softConflictUnits {
-		if initSystem() == "runit" {
-			// runit user services are links under ~/runit; presence is the probe.
-			if _, err := os.Lstat(filepath.Join(f.homeDir, "runit", runitName(unit))); err == nil {
-				f.softUnits = append(f.softUnits, unit)
-			}
-			continue
+		enabled := false
+		if f.distro != nil && hostInit() == initRunit {
+			_, err := os.Lstat(filepath.Join(f.homeDir, ".config/service", runitServiceName(unit)))
+			enabled = err == nil
+		} else {
+			enabled = unitEnabled("user", unit)
 		}
-		if unitEnabled("user", unit) {
+		if enabled {
 			f.softUnits = append(f.softUnits, unit)
 		}
 	}
@@ -472,11 +532,13 @@ func (f *facts) detectSecureBoot() {
 	}
 }
 
-// systemdBooted is sd_booted(3)'s canonical test: the directory only exists
-// when systemd is pid 1, even if libsystemd is installed under another init.
-func systemdBooted() bool {
-	fi, err := os.Stat("/run/systemd/system")
-	return err == nil && fi.IsDir()
+func runitServiceName(unit string) string {
+	return strings.TrimSuffix(unit, ".service")
+}
+
+func runitServiceEnabled(service string) bool {
+	_, err := os.Lstat(filepath.Join("/etc/runit/runsvdir/default", service))
+	return err == nil
 }
 
 func (f *facts) detectUcode() {
@@ -504,7 +566,7 @@ func (f *facts) gpuSummary() string {
 }
 
 func (f *facts) otherDM() string {
-	if f.currentDM != "" && f.currentDM != "sddm.service" {
+	if f.currentDM != "" && f.currentDM != "sddm.service" && f.currentDM != "sddm" {
 		return f.currentDM
 	}
 	return ""

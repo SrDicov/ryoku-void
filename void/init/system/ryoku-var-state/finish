@@ -1,0 +1,3 @@
+#!/bin/sh
+# Park the oneshot on every exit; runsv would otherwise restart it.
+exec sv down .

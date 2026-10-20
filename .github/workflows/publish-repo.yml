@@ -37,7 +37,8 @@ on:
 
 permissions:
   contents: read
-  actions: write
+  actions: read
+  checks: read
 
 # one publish per channel at a time: two interleaved uploads can leave run A's
 # packages under run B's db, exactly the skew the packages-first-db-last
@@ -94,10 +95,10 @@ jobs:
             exit 1
           fi
 
-      # Only what actions/checkout needs; the real toolchain is a file in the
-      # repo, so it cannot be read until after the checkout below.
-      - name: Install git for checkout
-        run: pacman -Sy --noconfirm --needed git
+      # Checkout and the first channel marker run before the full build
+      # toolchain is available.
+      - name: Install checkout and channel tools
+        run: pacman -Sy --noconfirm --needed git rclone jq
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -136,6 +137,52 @@ jobs:
           esac
           cat "$GITHUB_OUTPUT"
 
+      - name: Mark the channel build in progress
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          CHANNEL: ${{ steps.channel.outputs.channel }}
+          RELEASE: ${{ steps.channel.outputs.release }}
+          PREFIX: ${{ steps.channel.outputs.prefix }}
+        run: |
+          set -euo pipefail
+          ./bin/ryoku-r2-config
+          if [[ $CHANNEL == stable ]]; then
+            ./bin/ryoku-channel-status "Ryoku:$R2_BUCKET/x86_64" building "$GITHUB_SHA" \
+              --channel "$CHANNEL" --release "$RELEASE" \
+              --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          else
+            ./bin/ryoku-channel-status "Ryoku:$R2_BUCKET/$PREFIX/x86_64" building "$GITHUB_SHA" \
+              --channel "$CHANNEL" --release "$RELEASE" \
+              --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi
+
+      # ccache includes the preprocessed source, compiler, and flags in its
+      # keys, so changed headers and ABI inputs compile again. Bounded at 2 GB
+      # so the repository's 10 GB cache allowance is shared with the Void and
+      # Fedora builders instead of evicted every run.
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: arch-ccache-${{ github.sha }}
+          restore-keys: |
+            arch-ccache-
+
+      # Go's build and module caches are content-addressed; no package output
+      # or repository metadata is restored from them.
+      - name: Restore Go caches
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .gocache
+            .gomod
+          key: arch-go-${{ github.sha }}
+          restore-keys: |
+            arch-go-
+
       - name: Install build toolchain
         run: |
           set -euo pipefail
@@ -143,9 +190,10 @@ jobs:
           # This list used to be duplicated in both, drifted, and the drift is silent
           # until a recipe needs the missing tool.
           mapfile -t pkgs < <(grep -vE '^[[:space:]]*(#|$)' release/repo/build-toolchain.packages)
-          # rclone uploads the finished repo; it is not needed to build a package,
-          # so it stays here rather than in the shared build list.
-          pacman -Syu --noconfirm --needed "${pkgs[@]}" rclone
+          # ccache accelerates local compilation without becoming a package
+          # dependency or changing the shared container-install toolchain.
+          pacman -Syu --noconfirm --needed "${pkgs[@]}" ccache
+          sed -i 's/^BUILDENV=(\(.*\)!ccache/BUILDENV=(\1ccache/' /etc/makepkg.conf
 
       - name: Snapshot the published package set
         env:
@@ -184,11 +232,14 @@ jobs:
           rclone copy "Ryoku:$R2_BUCKET/$PREFIX/x86_64/" "$mirror/" --include '*.pkg.tar.zst' || true
           if [[ $CHANNEL == stable ]]; then
             rclone copy "Ryoku:$R2_BUCKET/x86_64/" "$mirror/" --include '*.pkg.tar.zst' --ignore-existing || true
-            # rclone applies filter rules in order and stops at the first match, so
-            # the exclude must come before the include or ryoku-desktop's
-            # testing bytes are adopted anyway (they carry CHANNEL=testing, and
-            # the container install then fails the release).
-            rclone copy "Ryoku:$R2_BUCKET/channels/testing/x86_64/" "$mirror/" --exclude 'ryoku-desktop-*' --include '*.pkg.tar.zst' --ignore-existing || true
+            # rclone evaluates filters in order, so reject ryoku-desktop before
+            # accepting the remaining packages. Its testing bytes carry the
+            # wrong channel marker and must rebuild for stable.
+            rclone copy "Ryoku:$R2_BUCKET/channels/testing/x86_64/" "$mirror/" \
+              --filter '- ryoku-desktop-*' \
+              --filter '+ *.pkg.tar.zst' \
+              --filter '- *' \
+              --ignore-existing || true
           fi
 
       - name: Verify hard dependencies exist in the official repos or [ryoku]
@@ -211,8 +262,13 @@ jobs:
           set -euo pipefail
 
           # makepkg refuses to run as root, so build as a throwaway user that
-          # owns the checked-out tree.
+          # owns the checked-out tree and the restored compiler caches.
           useradd --create-home builder
+          mkdir -p "$GITHUB_WORKSPACE/.ccache" "$GITHUB_WORKSPACE/.gocache" "$GITHUB_WORKSPACE/.gomod"
+          chown -R builder:builder \
+            "$GITHUB_WORKSPACE/.ccache" \
+            "$GITHUB_WORKSPACE/.gocache" \
+            "$GITHUB_WORKSPACE/.gomod"
           chown -R builder:builder "$GITHUB_WORKSPACE"
 
           # Hand the release private key to the build user through a 0600 file in
@@ -228,6 +284,10 @@ jobs:
           # build-repo.sh writes release.json beside the db, so a box and the
           # Hub can say which release they run and which the channel serves.
           runuser -u builder -- env \
+            CCACHE_DIR="$GITHUB_WORKSPACE/.ccache" \
+            CCACHE_MAXSIZE=2G \
+            GOCACHE="$GITHUB_WORKSPACE/.gocache" \
+            GOMODCACHE="$GITHUB_WORKSPACE/.gomod" \
             KEY_FILE="$key_file" \
             RYOKU_REPO_OUT="$GITHUB_WORKSPACE/release/repo/out" \
             RYOKU_REPO_MIRROR="$GITHUB_WORKSPACE/.published-mirror" \
@@ -243,18 +303,57 @@ jobs:
               gpg --batch --import "$KEY_FILE"
               ./release/repo/build-repo.sh
             '
+          CCACHE_DIR="$GITHUB_WORKSPACE/.ccache" ccache -s
 
           rm -f "$key_file"
+
+      - name: Save compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: arch-ccache-${{ github.sha }}
+
+      - name: Save Go caches
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .gocache
+            .gomod
+          key: arch-go-${{ github.sha }}
+
+      - name: Pack the repo for the artifact transport
+        # actions/upload-artifact refuses ':' in member paths (Windows
+        # compatibility), and a package epoch puts one in the filename. The
+        # repo dir is internal to this workflow -- the gate and the publish
+        # both unpack this tar -- so it rides as one archive.
+        run: tar -C release/repo/out/x86_64 -cf release/repo/ryoku-repo.tar .
 
       - name: Keep the signed repo for the gate and the publish
         uses: actions/upload-artifact@v4
         with:
           name: ryoku-repo-${{ github.run_id }}
-          path: release/repo/out/x86_64
+          path: release/repo/ryoku-repo.tar
           if-no-files-found: error
           retention-days: 3
           # packages are already zstd; recompressing them only costs minutes
           compression-level: 0
+
+  gate:
+    name: Required checks passed
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Wait for required checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./bin/ryoku-ci-gate "$GITHUB_SHA" --timeout-min 25
 
   # gate: install ryoku-desktop from the signed repo the build job produced
   # and materialize a full config on Arch and CachyOS before anything is
@@ -305,15 +404,22 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ryoku-repo-${{ github.run_id }}
-          path: release/repo/out/x86_64
+          path: release/repo
+      - name: Unpack the signed repo
+        run: |
+          mkdir -p release/repo/out/x86_64
+          tar -C release/repo/out/x86_64 -xf release/repo/ryoku-repo.tar
       - name: Install and verify the config
         run: RYOKU_PREBUILT_REPO=1 installation/tests/container-install.sh ${{ matrix.base }}
 
   publish:
     # only after the gate passes on every base; uploads the bytes it tested.
-    needs: [build, container-install]
+    needs: [build, container-install, gate]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write
     container:
       image: archlinux:latest
     steps:
@@ -330,7 +436,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ryoku-repo-${{ github.run_id }}
-          path: release/repo/out/x86_64
+          path: release/repo
+      - name: Unpack the signed repo
+        run: |
+          mkdir -p release/repo/out/x86_64
+          tar -C release/repo/out/x86_64 -xf release/repo/ryoku-repo.tar
       - name: Configure the bucket
         env:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -349,17 +459,21 @@ jobs:
           # Order matters (issue #21): if ryoku.db goes live before the packages
           # and .sig files it lists, SigLevel=Required installs fail with
           # "Maximum file size exceeded", because a missing .sig returns an HTML
-          # 404 that overruns pacman's signature size cap. So push packages and
-          # sigs first, the db last, then prune superseded versions. Keep each db
-          # and its .sig in one transfer: pacman fetches a db's sig even when the
-          # db is unchanged (304), so a db and sig from different builds served at
-          # once wedge a box on "invalid or corrupted database"; the client heals
-          # it (ryoku update, doctor).
+          # 404 that overruns pacman's signature size cap. Push packages and
+          # signatures first, the db next, prune superseded versions, and write
+          # release.json last as the completion marker. Keep each db and its
+          # .sig in one transfer: pacman fetches a db's sig even when the db is
+          # unchanged (304), so a db and sig from different builds served at
+          # once wedge a box on "invalid or corrupted database"; the client
+          # heals it (ryoku update, doctor).
           publish() {
             local src=$1 remote=$2
-            rclone copy "$src" "$remote" --exclude 'ryoku.db*' --exclude 'ryoku.files*' -P
-            rclone copy "$src" "$remote" --include 'ryoku.db*' --include 'ryoku.files*' -P
-            rclone sync "$src" "$remote" -P
+            rclone copy "$src" "$remote" \
+              --exclude 'ryoku.db*' --exclude 'ryoku.files*' --exclude 'release.json' -P
+            rclone copy "$src" "$remote" \
+              --filter '+ ryoku.db*' --filter '+ ryoku.files*' --filter '- *' -P
+            rclone sync "$src" "$remote" --exclude 'release.json' --exclude 'status.json' -P
+            rclone copyto "$src/release.json" "${remote%/}/release.json" -P
           }
           src="$GITHUB_WORKSPACE/release/repo/out/x86_64"
           publish "$src" "Ryoku:$R2_BUCKET/$PREFIX/x86_64/"
@@ -410,6 +524,28 @@ jobs:
             verify "Ryoku:$R2_BUCKET/x86_64"
           fi
 
+      - name: Freeze the testing build and update its ledger
+        if: needs.build.outputs.channel == 'testing'
+        env:
+          REMOTE: Ryoku:${{ secrets.R2_BUCKET }}
+          RELEASE: ${{ needs.build.outputs.release }}
+        run: |
+          set -euo pipefail
+          src="$GITHUB_WORKSPACE/release/repo/out/x86_64"
+          [[ -s $src/release.json ]] || { echo "::error::Tested repository has no release.json"; exit 1; }
+          directory=${RELEASE//+/_}
+          frozen="$REMOTE/channels/testing/builds/$directory/x86_64"
+
+          # release.json is the completion marker consumed by the ledger.
+          rclone sync "$src" "$frozen/" --exclude 'release.json' -P
+          rclone copyto "$src/release.json" "$frozen/release.json" -P
+          rclone check "$src" "$frozen/"
+
+          ./bin/ryoku-release-ledger "$REMOTE" arch testing \
+            | jq -e --arg release "$RELEASE" '.latest == $release' >/dev/null \
+            || { echo "::error::channels/testing/index.json does not list $RELEASE as latest"; exit 1; }
+          echo "::notice::Frozen testing build $RELEASE and updated channels/testing/index.json"
+
       - name: Record the release in the ledger
         if: needs.build.outputs.channel == 'stable'
         env:
@@ -422,7 +558,7 @@ jobs:
           # in-place edit once read a missing ledger as empty input and
           # published a zero-byte file. release-ledger.yml rebuilds it on
           # demand with the same script.
-          ./bin/ryoku-release-ledger "Ryoku:$R2_BUCKET" | jq -e --arg tag "$RELEASE" '.latest == $tag' >/dev/null \
+          ./bin/ryoku-release-ledger "Ryoku:$R2_BUCKET" arch | jq -e --arg tag "$RELEASE" '.latest == $tag' >/dev/null \
             || { echo "::error::releases/index.json does not list $RELEASE as latest"; exit 1; }
           echo "::notice::releases/index.json now lists $RELEASE as latest"
 
@@ -449,6 +585,66 @@ jobs:
             echo "::notice::Dispatched $wf on $RELEASE from $PREFIX"
           done
 
+      - name: Mark the channel published
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          CHANNEL: ${{ needs.build.outputs.channel }}
+          RELEASE: ${{ needs.build.outputs.release }}
+          PREFIX: ${{ needs.build.outputs.prefix }}
+        run: |
+          set -euo pipefail
+          if [[ $CHANNEL == stable ]]; then
+            ./bin/ryoku-channel-status "Ryoku:$R2_BUCKET/x86_64" published "$GITHUB_SHA" \
+              --channel "$CHANNEL" --release "$RELEASE" \
+              --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          else
+            ./bin/ryoku-channel-status "Ryoku:$R2_BUCKET/$PREFIX/x86_64" published "$GITHUB_SHA" \
+              --channel "$CHANNEL" --release "$RELEASE" \
+              --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi
+
+  mark-failed:
+    name: Mark a failed publish
+    needs: [build, container-install, gate, publish]
+    if: ${{ failure() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install channel tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y rclone jq
+      - name: Mark the channel failed
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          CHANNEL: ${{ needs.build.outputs.channel }}
+          RELEASE: ${{ needs.build.outputs.release }}
+          PREFIX: ${{ needs.build.outputs.prefix }}
+        run: |
+          set -euo pipefail
+          ./bin/ryoku-r2-config
+          if [[ $CHANNEL == stable ]]; then
+            ./bin/ryoku-channel-status "Ryoku:$R2_BUCKET/x86_64" failed "$GITHUB_SHA" \
+              --channel "$CHANNEL" --release "$RELEASE" \
+              --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          else
+            ./bin/ryoku-channel-status "Ryoku:$R2_BUCKET/$PREFIX/x86_64" failed "$GITHUB_SHA" \
+              --channel "$CHANNEL" --release "$RELEASE" \
+              --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi
+
+
   # A failed publish strands a whole set of commits on the channel: testers keep
   # running the last good build with no sign anything broke (a wm/niri release sat
   # unpublished for days behind a dependency-gate failure exactly this alert would
@@ -457,7 +653,7 @@ jobs:
   # webhook downgrades to a workflow error annotation, never masks the failure.
   notify-failure:
     name: Announce a failed publish
-    needs: [build, container-install, publish]
+    needs: [build, container-install, gate, publish]
     if: ${{ failure() && github.event_name == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

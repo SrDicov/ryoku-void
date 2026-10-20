@@ -30,14 +30,27 @@ Singleton {
     property alias osdRadius:  adapter.osdRadius
     property alias osdOpacity: adapter.osdOpacity
 
+    // The desktop and the bar read one shell.json value, so their haze agrees.
+    // Zero is a hard off switch even when several windows are stacked.
+    property alias deckFrost: adapter.deckFrost
+
+    function deckFrostIntensity(n: int): real {
+        const base = Math.max(0, Math.min(1, Number(root.deckFrost) || 0));
+        if (base === 0)
+            return 0;
+        return base + 0.25 * (Math.max(1, n) - 1);
+    }
+
     property alias frameBars: adapter.frameBars
     readonly property var normalizedFrameBars: FrameBars.normalize(frameBars, BarCatalog, MenuCatalog)
 
-    // barStyle: which bar design renders. "qsbar" is the default QS Bar top bar
-    // (a shipped folder style under modules/bar/barstyles/qsbar); "sumi" is the
-    // built-in painted left rail; any other id is an installed store folder
-    // style. Each owns its own bar, popouts and settings. Default qsbar.
+    // barStyle: which bar design renders. "orpheus" is the shipped default,
+    // provided by modules/bar/barstyles/orpheus. "sumi" is the built-in painted
+    // left rail; other ids select another shipped or installed folder style.
+    // Each style owns its own bar, popouts and settings.
+    property alias batteryAlerts: adapter.batteryAlerts
     property alias barStyle: adapter.barStyle
+    property alias notifications: adapter.notifications
 
     // obi: per-widget visibility for the Obi bar style, edited in Bar Studio.
     // A map of widgetId -> bool; an absent key reads as shown, so the bar is
@@ -47,28 +60,97 @@ Singleton {
     property alias nacre: adapter.nacre
     property alias qsbar: adapter.qsbar
     property alias kairos: adapter.kairos
+    property alias orpheus: adapter.orpheus
 
-    // dock: the first-class app dock surface (modules/dock). A top-level store,
-    // not a bar-style key, because the dock is now style-agnostic -- neither qsbar
-    // nor Sumi owns it. Off until the user turns it on (Hub -> Bar Studio -> Dock).
-    // Read and written through the services Dock singleton so every consumer goes
-    // through one place.
+    // python: the serpantinum bar style's own settings namespace (shell.json
+    // "python"), read and written by the style's own Config mirror.
+    property alias python: adapter.python
+    property alias nomarchy: adapter.nomarchy
+
+
+    // A folder style may draw its own notification banners and its own volume/
+    // brightness OSD. While it is active and does not opt out, the shell's
+    // resident banners and OSD windows hold back so exactly one of each paints.
+    readonly property bool styleOwnsBanners: (barStyle === "python"
+        && !(root.python && root.python.general && root.python.general.notifications === false))
+        || (barStyle === "nomarchy"
+        && !(root.nomarchy && root.nomarchy.notifications === false))
+    readonly property bool styleOwnsFeedback: (barStyle === "python"
+        && !(root.python && root.python.general && root.python.general.osd === false))
+        || (barStyle === "nomarchy"
+        && !(root.nomarchy && root.nomarchy.osd === false))
+
+    // dock: the universal app dock store. It is top-level because design,
+    // placement and pins survive bar-style and dock-design changes. Stage
+    // Editor writes it through the Dock singleton; every renderer reads it.
     property alias dock: adapter.dock
 
     // clipboard: geometry and corner treatment for the bottom-centred history
     // surface. The adapter keeps it a self-contained shell.json subtree so it
     // can retune live without a shell restart.
     property alias clipboard: adapter.clipboard
+    // Phone integration is optional and remains dormant until its Hub install
+    // transaction has completed.
+    property alias phone: adapter.phone
     readonly property var normalizedNacre: NacreConfig.normalize(nacre)
+    readonly property var defaultControls: ({
+        "sections": [
+            { "id": "vitals", "visible": true },
+            { "id": "connections", "visible": true },
+            { "id": "powerProfile", "visible": true },
+            { "id": "media", "visible": false },
+            { "id": "levels", "visible": true },
+            { "id": "bottomControls", "visible": true }
+        ],
+        "hidden": []
+    })
+    property var controls: defaultControls
+
+    readonly property var askBubble: {
+        const ask = adapter.ask && typeof adapter.ask === "object" ? adapter.ask : ({});
+        const bubble = ask.bubble && typeof ask.bubble === "object" ? ask.bubble : ({});
+        const x = Number(bubble.x);
+        const y = Number(bubble.y);
+        return {
+            enabled: bubble.enabled === true,
+            x: Math.max(0, Math.min(1, isFinite(x) ? x : 0.94)),
+            y: Math.max(0, Math.min(1, isFinite(y) ? y : 0.68)),
+            screen: String(bubble.screen || "")
+        };
+    }
+
+    function patchAskBubble(key, value) {
+        if (["enabled", "x", "y", "screen"].indexOf(key) < 0)
+            return;
+        let clean = value;
+        if (key === "x" || key === "y") {
+            const number = Number(value);
+            clean = Math.max(0, Math.min(1, isFinite(number) ? number : root.askBubble[key]));
+        } else if (key === "enabled") {
+            clean = value === true;
+        } else {
+            clean = String(value || "");
+        }
+        const next = Object.assign({}, root.askBubble);
+        next[key] = clean;
+        adapter.ask = { bubble: next };
+        shaderCtl.queued += "call settings.patch "
+            + JSON.stringify({ path: "ask.bubble." + key, value: clean }) + "\n";
+        if (shaderCtl.connected)
+            shaderCtl.flushQueued();
+        else
+            shaderCtl.connected = true;
+    }
 
     // typography: a scale that grows or shrinks the whole shell (the bar text
     // and the surfaces around it), keeping the readout legible without overflow.
     property alias fontScale:  adapter.fontScale
 
-    // fontFamily: the single system font. Empty resolves to Space Grotesk (UI)
-    // and SpaceMono (monospace/terminal); when set, the daemon mirrors it to GTK,
-    // Qt and the terminal so everything matches. Set from Hub -> Global.
-    property alias fontFamily: adapter.fontFamily
+    // The UI and terminal families are independent: proportional choices stay
+    // in the shell and apps, while terminals keep an explicitly monospace face.
+    // Both are set from Hub -> Global and applied system-wide by the daemon.
+    property alias fontFamily:         adapter.fontFamily
+    property alias terminalFontFamily: adapter.terminalFontFamily
 
     // fontSize: the base point size the daemon mirrors system-wide (apps and the
     // terminal). Set from Hub -> Global.
@@ -141,16 +223,20 @@ Singleton {
     property var themePalette: null
     function refreshThemePalette() {
         var pal = null;
+        var nextControls = root.defaultControls;
         var t = file.text();
         if (t) {
             try {
                 var o = JSON.parse(t);
                 if (o && typeof o.themePalette === "object" && o.themePalette !== null)
                     pal = o.themePalette;
+                if (o && typeof o.controls === "object" && o.controls !== null)
+                    nextControls = o.controls;
             } catch (e) {
             }
         }
         themePalette = pal;
+        controls = nextControls;
     }
 
     // brand: the desktop's mark + name, user-overridable from Ryoku Settings ->
@@ -182,30 +268,70 @@ Singleton {
             property real frameCorner: 8
             property real osdRadius: 0
             property real osdOpacity: 1
+            property real deckFrost: 0.45
             property real fontScale: 1.3
             property string fontFamily: "Space Grotesk"
+            property string terminalFontFamily: "JetBrainsMono Nerd Font"
             property int fontSize: 11
             property string weatherLocation: ""
             property string weatherUnit: "auto"
             property string formatLocale: ""
             property string screenShader: ""
             property var frameBars: FrameBars.defaultConfig()
-            property string barStyle: "qsbar"
+            property var batteryAlerts: ({ enabled: true, warningEnabled: true, criticalEnabled: true, warningPercent: 25, criticalPercent: 10 })
+            property var notifications: ({
+                "notification_position": "Right",
+                "popup_window_margins": 0,
+                "show_images": false
+            })
+            property string barStyle: "orpheus"
             property string launcherTarget: "studio"
             property var obi: ({})
             property var nacre: NacreConfig.defaultConfig()
             property var qsbar: ({})
             property var kairos: ({})
+            property var orpheus: ({})
+            property var python: ({})
+            property var nomarchy: ({
+                "notifications": true,
+                "osd": true
+            })
             property var dock: ({
                 "enabled": false,
+                "design": "ryoku",
                 "edge": "auto",
                 "autohide": true,
+                "size": 44,
                 "pinned": [],
                 "magnify": true,
+                "style": "islands",
                 "frost": true,
                 "shadow": true,
                 "labels": true,
-                "media": false
+                "media": false,
+                "python": {
+                    "onTop": true,
+                    "floating": false,
+                    "opacity": 100,
+                    "exclusive": false,
+                    "smartAutohide": true,
+                    "autohideTimeout": 1000,
+                    "overrideBoundsCorrection": false,
+                    "enableScrolling": false,
+                    "visibleElements": 7,
+                    "hoverScale": 120,
+                    "cascadeScale": false
+                },
+                "shima": {
+                    "shape": "auto",
+                    "notch": true,
+                    "material": "inherit",
+                    "magnifySize": 150,
+                    "launcher": true,
+                    "reserveSpace": true,
+                    "revealOnEmpty": true,
+                    "badges": true
+                }
             })
             property var clipboard: ({
                 "widthPercent": 65,
@@ -215,6 +341,68 @@ Singleton {
                 "paneRadius": 12,
                 "cardRadius": 9,
                 "pruneWeekly": false
+            })
+            property var phone: ({
+                "enabled": false,
+                "desktopNotifications": true,
+                "contacts": {
+                    "enabled": true,
+                    "hideUnnamed": true
+                },
+                "scrcpy": {
+                    "useWireless": false,
+                    "autoWirelessIp": true,
+                    "wirelessIp": "",
+                    "wirelessPort": 5555,
+                    "pinAdbPort": false,
+                    "maxSize": 0,
+                    "maxFps": 60,
+                    "videoBitRate": "8M",
+                    "audio": true,
+                    "turnScreenOff": false,
+                    "stayAwake": true,
+                    "showTouches": false,
+                    "clipboardSync": true,
+                    "keyboardMode": "uhid",
+                    "autoResume": true,
+                    "appMode": {
+                        "showAppIcons": true,
+                        "autoUnlock": true,
+                        "flexDisplay": false,
+                        "displayWidth": 1280,
+                        "displayHeight": 960,
+                        "displayDpi": 240,
+                        "onSessionEnd": "home"
+                    },
+                    "recording": { "folder": "" }
+                },
+                "webcam": {
+                    "cameraFacing": "back",
+                    "width": 1280,
+                    "height": 720,
+                    "fps": 30,
+                    "videoDevice": ""
+                },
+                "microphone": {
+                    "enabled": false,
+                    "micGain": 100,
+                    "monitor": false,
+                    "setDefault": false
+                },
+                "alarm": {
+                    "enabled": true,
+                    "pollMinutes": 10,
+                    "clockApps": [],
+                    "ignorePackages": []
+                }
+            })
+            property var ask: ({
+                "bubble": {
+                    "enabled": false,
+                    "x": 0.94,
+                    "y": 0.68,
+                    "screen": ""
+                }
             })
         }
     }

@@ -117,13 +117,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          # a tag pushed by GITHUB_TOKEN doesn't fire publish-repo's tag
-          # trigger, so dispatch it explicitly. publish-repo builds the frozen
-          # releases/<tag>/ set, moves the stable pointer onto it, records the
-          # release in the ledger, and dispatches the ISO build from that
-          # directory once it is verified, so nothing here races the upload.
-          gh workflow run publish-repo.yml --ref "$RELEASE_TAG"
-          echo "::notice::Dispatched publish-repo.yml on $RELEASE_TAG."
+          # Tags pushed by GITHUB_TOKEN do not fire tag-push workflows. Dispatch
+          # every native repository publisher on the tag so each one resolves
+          # the stable channel, freezes the release, moves its stable pointer,
+          # and starts any ISO build it owns.
+          for workflow in publish-repo.yml publish-repo-void.yml publish-repo-fedora.yml; do
+            gh workflow run "$workflow" --ref "$RELEASE_TAG"
+            echo "::notice::Dispatched $workflow on $RELEASE_TAG."
+          done
 
       - name: Dispatch release notes
         shell: bash

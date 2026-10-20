@@ -2,6 +2,59 @@
 
 ## Unreleased
 
+### Added
+- **Super+Alt+Space opens the Rashin app.** The companion window summons the
+  single-instance way: a second press focuses the open window instead of
+  spawning a twin, and a window rule floats and centres it like the other
+  app windows (`modules/binds.lua`, `modules/window_rules.lua`).
+
+### Changed
+- **Login raises the reload cover.** The session autostart chain calls
+  `ryoku-reload-cover begin boot` after the environment push and before
+  `session-start` restarts the shell services, so the desktop is covered from
+  the greeter handoff until the loaded shell releases it
+  (`modules/autostart.lua`).
+- **Super+Q asks first when iRiS is set to.** The close bind reads
+  `shell.json` in place and only goes through the shell when the iRiS bar
+  style is active with its close confirmation on; every other close stays a
+  native dispatch (`modules/binds.lua`).
+- **Super+Shift+S and Print open the ryoshot region front on every bar style.**
+  ryoshot now carries the iNiR-style front (Shot, Edit, OCR, Search, Record,
+  colour pick) itself, so the screenshot binds always launch it rather than
+  routing to the iRiS region toolbar when iRiS is the bar style
+  (`modules/binds.lua`, `modules/ryoshot.lua`).
+
+### Fixed
+- **A custom Settings size is no longer overwritten after open.** The generated
+  Settings window module drives both its opening rule and work-area fit hook, so
+  custom percentages stay centred while Full page keeps the existing fit
+  (`modules/window_rules.lua`, `user.lua`, `../wm/hyprland/`).
+- **Undocking cannot leave every connected output disabled.** If a saved layout
+  enables only a monitor that is no longer connected, login and the existing
+  monitor hotplug hooks temporarily restore the built-in panel with its saved
+  mode, position, scale and colour settings. Reconnecting the enabled monitor
+  restores the user's panel-off preference
+  (`scripts/ryoku-monitor`, `wm/hyprland/outputs.go`).
+- **Hyprland reloads no longer duplicate `~/.local/bin` in PATH.** Reapplying
+  the environment keeps the directory first without growing PATH on each
+  config reload (`modules/env.lua`).
+- **Arrow keys still move focus when a window is maximized.** Super+D
+  maximizes, and with the compositor's default the direction focus binds then
+  refuse to leave a maximized or fullscreen window: on the scrolling layout
+  the maximized window covers the tape, so the neighbour beside it becomes
+  unreachable until the state clears. Direction focus now moves to the
+  neighbour and leaves the maximized window maximized (`modules/binds.lua`).
+- **Ryoku Settings opens inside the work area.** Its full-page float was sized
+  from the whole monitor, so it slid under whatever the shell reserves (the
+  iRiS frame's edges, a bar). It now fits the work area with the same gaps and
+  border a tiled window gets (`modules/window_rules.lua`).
+- **The update and rollback log floats above Ryoku Settings.** Both are
+  launched from the Settings window itself, and a tiled terminal always
+  renders under a float, so the run's output hid behind the 99% page until
+  it finished (#288). The launches name the `dev.ryoku.update` window class and
+  a rule floats, sizes and centres it like every other tool terminal
+  (`modules/window_rules.lua`).
+
 ### Changed
 - **`binds.lua` carries the shared catalogue's new shortcuts.** Page Up/Down
   workspace navigation and sending, screen focus and send with Super+Alt and

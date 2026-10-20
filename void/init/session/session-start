@@ -1,0 +1,82 @@
+#!/bin/sh
+# Republish the compositor environment before restarting supervised processes.
+
+INIT_LIB=${RYOKU_INIT_LIB:-/usr/lib/ryoku/runit}
+SERVICE_DIR=${RYOKU_USER_SERVICE_DIR:-$HOME/.config/service}
+ROSTER=${RYOKU_RUNIT_SESSION_SERVICES:-$SERVICE_DIR/.ryoku-session-services}
+ENV_DIR=${TURNSTILE_ENV_DIR:-$HOME/.config/service-env}
+POWER_CUTOVER=${RYOKU_POWER_CUTOVER:-ryoku-power-cutover}
+
+log() {
+	printf 'ryoku-session: %s\n' "$*" >&2
+}
+
+wait_for_supervisor() {
+	service=$1
+	attempts=50
+	while [ ! -r "$service/supervise/stat" ]; do
+		attempts=$((attempts - 1))
+		[ "$attempts" -gt 0 ] || return 1
+		sleep 0.1
+	done
+}
+
+umask 077
+if mkdir -p "$ENV_DIR"; then
+	env | while IFS='=' read -r name value; do
+		case $name in
+			PWD|OLDPWD|SHLVL|_|TURNSTILE_*) continue ;;
+		esac
+		printf '%s' "$value" > "$ENV_DIR/$name" || log "could not publish $name"
+	done
+else
+	log "could not create environment directory $ENV_DIR"
+fi
+
+if ! dbus-update-activation-environment --all; then
+	log "could not update the D-Bus activation environment"
+fi
+
+if [ -x "$INIT_LIB/xdg-dirs" ]; then
+	"$INIT_LIB/xdg-dirs" "$ENV_DIR" || log "could not render XDG user directories"
+else
+	log "missing XDG directory renderer $INIT_LIB/xdg-dirs"
+fi
+if ! ryoku-host session ensure --user; then
+	log "could not provision Ryoku user services"
+fi
+if ! ryoku-host svc reconcile --user; then
+	log "could not reconcile the Ryoku session roster"
+fi
+
+ryoku-reload-cover begin boot || true
+
+if [ ! -r "$ROSTER" ]; then
+	log "missing service roster $ROSTER"
+	exit 1
+fi
+
+while IFS= read -r name || [ -n "$name" ]; do
+	case $name in
+		""|\#*) continue ;;
+	esac
+	service=$SERVICE_DIR/$name
+	if [ ! -d "$service" ]; then
+		log "missing service $service"
+		continue
+	fi
+	if ! wait_for_supervisor "$service"; then
+		log "service is not supervised: $service"
+		exit 1
+	fi
+done < "$ROSTER"
+
+# The lifecycle owner stops any daemons still bound to the previous login,
+# starts this session's roster, and watches login1 so they stop at logout.
+if ! RYOKU_RUNIT_SESSION_SERVICES="$ROSTER" \
+	"$POWER_CUTOVER" session-start-logged; then
+	log "could not bind Ryoku services to this login session"
+	exit 1
+fi
+
+exit 0

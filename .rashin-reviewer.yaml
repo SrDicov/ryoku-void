@@ -1,0 +1,30 @@
+# Settings for the review gate in .githooks/pre-commit (rashin-reviewer).
+# `rashin-reviewer rules` lists every rule and check with its severity. The
+# model review reads its guidelines, path filters and instructions from
+# .coderabbit.yaml, so they live in one place.
+block_at: major
+
+# Third-party and generated trees keep the security and syntax checks but skip
+# style checks; the ShellCheck workflow skips the same two vendored trees.
+vendored:
+  - "**/vendor/**"
+  - "ryoku/lockscreen/qylock/**"
+  - "ryoku/i18n/catalog/**"
+  - "**/*.qmltypes"
+
+tools:
+  # Step 2 of .githooks/pre-commit already runs bash -n on staged scripts.
+  bash_syntax: {enabled: false}
+  # CI's flags (.github/workflows/shellcheck.yml): the gate must never refuse
+  # what CI accepts.
+  shellcheck: {args: ["-x", "-s", "bash", "--severity=warning"]}
+
+rules:
+  allow:
+    # Wallpapers, fonts and the prebuilt shell installer are large on purpose.
+    large-file:
+      - "ryoku/assets/wallpapers/**"
+      - "**/fonts/**"
+      - "ryoku-shell-installer/ryoku-shell-install"
+    # The R2 retention Worker logs through console.log; wrangler tail reads it.
+    debug-leftover: ["release/r2-retention/**"]

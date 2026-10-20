@@ -1,0 +1,40 @@
+# Template file for 'ryomanager'
+pkgname=ryomanager
+version=0.1.0.r27.g459c671
+revision=1
+archs="x86_64"
+_commit=459c6714e31276f73025369e722cf4ab48eccbc3
+wrksrc="ryomanager-${_commit}"
+hostmakedepends="go nodejs pkg-config"
+makedepends="gtk+3-devel libwebkit2gtk41-devel"
+depends="desktop-file-utils gtk+3 hicolor-icon-theme libwebkit2gtk41"
+short_desc="System monitor and process manager for Ryoku"
+maintainer="Ryoku <releases@ryoku.dev>"
+license="GPL-3.0-only"
+homepage="https://github.com/Ryoku-dev/ryomanager"
+distfiles="${homepage}/archive/${_commit}.tar.gz"
+checksum=60b83e0663166035a5f81fa456d543ceb324d6286b9699f37d8a47fa460c39f7
+nocross=yes
+
+# The upstream source has no release tags. Keep version, commit, and checksum
+# together when moving this snapshot.
+do_build() {
+	cd frontend
+	npm ci
+	npm run build
+	cd ..
+
+	export CGO_ENABLED=1
+	export GOPATH="${wrksrc}/.gopath"
+	export GOCACHE="${wrksrc}/.gocache"
+	export GOFLAGS="-mod=mod -modcacherw -buildmode=pie"
+	go build -trimpath -tags "desktop,production,webkit2_41" \
+		-ldflags "-s -w" -o ryomanager .
+}
+
+do_install() {
+	vbin ryomanager
+	vinstall "${FILESDIR}/ryomanager.desktop" 644 usr/share/applications
+	vinstall build/appicon.png 644 usr/share/icons/hicolor/64x64/apps ryomanager.png
+	vlicense LICENSE
+}

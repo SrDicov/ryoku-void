@@ -1,0 +1,24 @@
+# Template file for 'quickemu'
+pkgname=quickemu
+version=4.9.9
+revision=1
+noarch=yes
+depends="bash qemu coreutils grep jq procps-ng python3 cdrtools usbutils util-linux sed spice-gtk swtpm wget xrandr zsync edk2-ovmf xdg-user-dirs socat"
+short_desc="Create and run optimized desktop virtual machines"
+maintainer="Ryoku <releases@ryoku.dev>"
+license="MIT"
+homepage="https://github.com/quickemu-project/quickemu"
+distfiles="${homepage}/archive/refs/tags/${version}.tar.gz"
+checksum=ef5c5015e91c4fef6797c4961c400d18e1ae8191a8d1eae6e3512823dd2ff2a8
+
+
+do_install() {
+	vbin chunkcheck
+	vbin quickemu
+	vbin quickget
+	vbin quickreport
+	vman docs/quickemu.1
+	vman docs/quickget.1
+	vman docs/quickemu_conf.5
+	vlicense LICENSE
+}

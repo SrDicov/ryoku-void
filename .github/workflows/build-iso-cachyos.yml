@@ -3,10 +3,12 @@ name: Build ISO (CachyOS)
 # cachyos variant: the full CachyOS layer (linux-cachyos kernel, cachyos-settings,
 # schedulers, proton) baked into the offline closure. fires on a cachyos-v*
 # release tag or a manual dispatch, and calls the reusable builder with
-# variant=cachyos. a separate workflow means its own run counter, so the cachyos
-# tracking id is independent of the plain one ("R1" on the first build). it
-# publishes latest-cachyos.json/latest-cachyos.js to the same R2 bucket, which the
-# website reads alongside the plain latest.json.
+# variant=cachyos. a maintainer can dispatch from unstable-dev with
+# `-f publish=false -f repo_url=https://repo.ryoku.dev/stable/channels/testing/x86_64`
+# to get a testing ISO as the `ryoku-iso` artifact. a separate workflow means its
+# own run counter, so the cachyos tracking id is independent of the plain one
+# ("R1" on the first build). it publishes latest-cachyos.json/latest-cachyos.js
+# to the same R2 bucket, which the website reads alongside the plain latest.json.
 on:
   workflow_dispatch:
     inputs:
@@ -24,6 +26,11 @@ on:
         required: false
         default: ''
         type: string
+      publish:
+        description: 'Upload the ISO and move the latest pointer; false keeps it as a workflow artifact only'
+        required: false
+        default: true
+        type: boolean
   push:
     tags:
       - 'cachyos-v*'
@@ -40,4 +47,5 @@ jobs:
       variant: cachyos
       release_stage: ${{ github.event.inputs.release_stage || 'beta' }}
       repo_url: ${{ github.event.inputs.repo_url || '' }}
+      publish: ${{ github.event.inputs.publish != 'false' }}
     secrets: inherit

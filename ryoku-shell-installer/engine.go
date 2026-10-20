@@ -8,9 +8,11 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,19 +22,122 @@ import (
 	"time"
 
 	"ryoku-i18n"
+	installerplan "ryoku-installerplan"
 	wm "ryoku-wm"
 )
 
 // line-anchored so a commented-out "#[ryoku]" stanza does not count.
 var ryokuStanzaRe = regexp.MustCompile(`(?m)^\[ryoku\]`)
 
-const repoURL = "https://github.com/SrDicov/ryoku-void.git"
+const repoURL = "https://github.com/ryoku-dev/ryoku.git"
 
-const pacmanStanza = `
-[ryoku]
-SigLevel = Required
-Server = https://repo.ryoku.dev/stable/$arch
-`
+// The Ryoku channels an installer payload ref belongs to. unstable-dev is what
+// each testing repository rebuilds on every push; everything else matches the
+// stable repository.
+const (
+	stableServer         = "https://repo.ryoku.dev/stable/$arch"
+	testingServer        = "https://repo.ryoku.dev/stable/channels/testing/$arch"
+	voidStableRepo       = "https://repo.ryoku.dev/stable/void/x86_64"
+	voidTestingRepo      = "https://repo.ryoku.dev/stable/void/channels/testing/x86_64"
+	voidRepoConfig       = "/etc/xbps.d/20-ryoku.conf"
+	voidSystemRepo       = "/usr/share/xbps.d/20-ryoku.conf"
+	voidTrustedKeyDir    = "/var/db/xbps/keys"
+	fedoraStableRepo     = "https://repo.ryoku.dev/stable/fedora/$releasever/x86_64"
+	fedoraTestingRepo    = "https://repo.ryoku.dev/stable/fedora/$releasever/channels/testing/x86_64"
+	fedoraRepoConfig     = "/etc/yum.repos.d/ryoku.repo"
+	fedoraRepoDir        = "/etc/yum.repos.d"
+	fedoraKeyPath        = "/etc/pki/rpm-gpg/RPM-GPG-KEY-ryoku"
+	fedoraKeyURL         = "https://repo.ryoku.dev/stable/ryoku-release-key.pub.asc"
+	fedoraKeyFingerprint = "EB6D3C0F55A7B3CABA6B2838847B274F025DD6E3"
+	cachyosMirrorDB      = "https://mirror.cachyos.org/repo/x86_64_v3/cachyos-v3/cachyos-v3.db"
+)
+
+// channelForRef names the [ryoku] channel a payload ref belongs to (the value
+// `ryoku track` records as the channel intent) and its pacman Server.
+func channelForRef(ref string) (channel, server string) {
+	if ref == "unstable-dev" {
+		return "testing", testingServer
+	}
+	return "stable", stableServer
+}
+
+func voidRepository(ref string) (channel, repository string, writeOverride bool) {
+	channel = "stable"
+	repository = voidStableRepo
+	if ref == "unstable-dev" {
+		channel = "testing"
+		repository = voidTestingRepo
+		writeOverride = true
+	}
+	if override := os.Getenv("RYOKU_XBPS_REPO"); override != "" {
+		repository = override
+		writeOverride = true
+	}
+	return
+}
+
+var fedoraReleaseTagRe = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$`)
+
+func fedoraRepository(ref string) (channel, repository string) {
+	switch {
+	case ref == "unstable-dev":
+		channel, repository = "testing", fedoraTestingRepo
+	case fedoraReleaseTagRe.MatchString(ref):
+		channel = ref
+		repository = "https://repo.ryoku.dev/stable/fedora/$releasever/releases/" + ref + "/x86_64"
+	default:
+		channel, repository = "stable", fedoraStableRepo
+	}
+	if override := os.Getenv("RYOKU_RPM_REPO"); override != "" {
+		repository = override
+	}
+	return
+}
+
+func fedoraRepoConfigPath() string {
+	if path := os.Getenv("RYOKU_DNF_REPO_CONFIG"); path != "" {
+		return path
+	}
+	return fedoraRepoConfig
+}
+
+func fedoraRepoContent(repository string) string {
+	return "[ryoku]\n" +
+		"name=Ryoku\n" +
+		"baseurl=" + repository + "\n" +
+		"enabled=1\n" +
+		"gpgcheck=1\n" +
+		"repo_gpgcheck=1\n" +
+		"gpgkey=file://" + fedoraKeyPath + "\n"
+}
+
+func pacmanStanza(server string) string {
+	return "\n[ryoku]\nSigLevel = Required\nServer = " + server + "\n"
+}
+
+// setRyokuServer points the [ryoku] stanza's Server at server and returns the
+// rewritten config with the Server it replaced ("" when the stanza has none).
+// other sections' Server lines are never touched.
+func setRyokuServer(conf, server string) (string, string) {
+	lines := strings.Split(conf, "\n")
+	inRyoku := false
+	for i, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if strings.HasPrefix(t, "[") {
+			inRyoku = t == "[ryoku]"
+			continue
+		}
+		if !inRyoku {
+			continue
+		}
+		k, v, ok := strings.Cut(t, "=")
+		if ok && strings.TrimSpace(k) == "Server" {
+			lines[i] = "Server = " + server
+			return strings.Join(lines, "\n"), strings.TrimSpace(v)
+		}
+	}
+	return conf, ""
+}
 
 // ryokuPkgs mirrors the ISO's deploy.sh: the keyring plus the ryoku-desktop
 // umbrella. The umbrella version-pins and pulls every monorepo component and
@@ -42,6 +147,8 @@ Server = https://repo.ryoku.dev/stable/$arch
 // Ryoku desktop set. Everything else (session, base OS, fonts) comes from
 // base.packages via readBasePackages: the same manifest the ISO pacstraps.
 var ryokuPkgs = []string{"ryoku-keyring", "ryoku-desktop"}
+
+var fedoraRyokuPkgs = []string{"ryoku", "ryoku-keyring", "ryoku-desktop", "ryoku-desktop-hyprland", "ryoku-desktop-niri"}
 
 // ryokuOverwriteGlob names the ryoku-desktop-owned paths that a prior partial
 // install, a dev deploy, or the ISO installer can leave unowned on disk: the
@@ -75,6 +182,45 @@ var bootChainSkip = map[string]bool{
 // pulled; no AUR build is needed.
 var aurPkgs = []string{"bibata-cursor-theme-bin", "localsend-bin", "voxtype-bin"}
 
+var browserChoices = installerplan.IDs(installerplan.Browser)
+var loginShellChoices = installerplan.IDs(installerplan.LoginShell)
+var fileManagerChoices = installerplan.IDs(installerplan.FileManager)
+
+var browserPackage = func() map[string]string {
+	packages := make(map[string]string, len(browserChoices))
+	for _, choice := range installerplan.Choices(installerplan.Browser) {
+		// None installs nothing, so it has no package to name and stays out of
+		// the map. Its only reader asks for "zen" by name.
+		if len(choice.Packages) == 0 {
+			continue
+		}
+		packages[choice.ID] = choice.Packages[0]
+	}
+	return packages
+}()
+
+var fileManagerDesktop = map[string]string{
+	"nautilus": "org.gnome.Nautilus.desktop",
+	"dolphin":  "org.kde.dolphin.desktop",
+	"thunar":   "thunar.desktop",
+}
+
+var loginShellPath = func() map[string]string {
+	paths := make(map[string]string, len(loginShellChoices))
+	for _, choice := range installerplan.Choices(installerplan.LoginShell) {
+		paths[choice.ID] = choice.Executable
+	}
+	return paths
+}()
+
+var shellStackPackages = func() map[string][]string {
+	packages := make(map[string][]string, len(loginShellChoices))
+	for _, choice := range installerplan.Choices(installerplan.LoginShell) {
+		packages[choice.ID] = append([]string(nil), choice.Packages...)
+	}
+	return packages
+}()
+
 // system/packages/dev.packages; ryoku recovery builds from source and needs go.
 var devPkgs = []string{"go", "nodejs", "npm", "python", "python-pip", "python-pipx", "mise"}
 
@@ -85,75 +231,199 @@ var sparsePaths = []string{
 }
 
 type plan struct {
-	nvidia     bool   // proprietary NVIDIA driver setup
-	switchDM   bool   // disable current DM, enable SDDM
-	switchNet  bool   // disable other network stacks, enable NetworkManager
-	rivals     bool   // remove rival shell packages
-	softOff    bool   // disable conflicting user daemons
-	aur        bool   // AUR extras
-	fish       bool   // fish as login shell
-	devtools   bool   // dev.packages toolchains (go/rust/node/python; recovery needs go)
-	omarchy    bool   // retire the [omarchy] repo and mirror pin
-	monPins    bool   // pin the salvaged monitor layout in monitors_user.lua
-	greeter    bool   // point SDDM at the Ryoku greeter theme
-	resume     bool   // skip steps a previous interrupted run already finished
-	azertyFR   bool   // force the French AZERTY layout (fr) on desktop, console, greeter
-	azertyBE   bool   // force the Belgian AZERTY layout (be) on desktop, console, greeter
-	compositor string // window manager to install (selects ryoku-desktop-<name>)
+	nvidia      bool   // proprietary NVIDIA driver setup
+	switchDM    bool   // disable current DM, enable SDDM
+	switchNet   bool   // disable other network stacks, enable NetworkManager
+	rivals      bool   // remove rival shell packages
+	softOff     bool   // disable conflicting user daemons
+	aur         bool   // AUR extras
+	devtools    bool   // dev.packages toolchains (go/rust/node/python; recovery needs go)
+	omarchy     bool   // retire the [omarchy] repo and mirror pin
+	monPins     bool   // pin the salvaged monitor layout in monitors_user.lua
+	greeter     bool   // point SDDM at the Ryoku greeter theme
+	resume      bool   // skip steps a previous interrupted run already finished
+	azertyFR    bool   // force the French AZERTY layout (fr) on desktop, console, greeter
+	azertyBE    bool   // force the Belgian AZERTY layout (be) on desktop, console, greeter
+	compositor  string // window manager to install (selects ryoku-desktop-<name>)
+	browser     string // firefox, chromium, zen or none
+	shell       string // fish, zsh or bash
+	fileManager string
+	edition     installerplan.EditionPlan
+	components  map[string]*bool
 }
 
-func defaultPlan(f *facts) *plan {
-	return &plan{
-		// secure boot rejects unsigned dkms modules and the nvidia script also
-		// blacklists nouveau: proceeding would boot into a black screen. only
-		// an sbctl-managed box gets to keep the default.
-		nvidia:    f.hasNvidia && !f.nouveauLive && !(f.secureBoot && !f.sbctlSigned),
-		switchDM:  true,
-		switchNet: true,
-		rivals:    true,
-		softOff:   true,
-		aur:       true,
-		fish:      !strings.HasSuffix(f.userShell, "/fish"),
-		omarchy:   f.omarchyRepo || f.omarchyMirror || len(f.omarchyGuards) > 0,
-		monPins:   len(f.monOutputs) > 0,
-		// when KDE's sddm-kcm owns sddm.conf.d the user chose that greeter
-		// look; keep it unless they opt in.
-		greeter:    !f.kdeSddmConf,
-		resume:     f.prevRun != nil,
-		compositor: availableCompositors()[0],
-		// the AZERTY overrides are opt-in only; a salvaged layout already
-		// covers anyone who had one configured.
+func defaultPlan(f *facts, compositorChoices ...[]string) *plan {
+	edition := "Arch"
+	if f.distroID != "" {
+		edition = f.distroID
+	} else if f.distro != nil {
+		edition = f.distro.name
+	}
+	return defaultPlanWithEdition(f, sourceEditionChoices(edition), compositorChoices...)
+}
+
+func defaultPlanWithEdition(f *facts, edition editionCompositorPlan, compositorChoices ...[]string) *plan {
+	availableShells := edition.choices.AvailableIDs(installerplan.LoginShell)
+	shell := installerplan.ExistingLoginShell(f.userShell, availableShells)
+	availableFiles := edition.choices.AvailableIDs(installerplan.FileManager)
+	fileManager := installerplan.ExistingFileManager(f.fileManager, availableFiles)
+	availableCompositors := edition.choices.AvailableIDs(installerplan.Compositor)
+	if len(compositorChoices) > 0 && len(compositorChoices[0]) > 0 {
+		availableCompositors = compositorChoices[0]
+	}
+	compositor := installerplan.FreshSelection(installerplan.Compositor, availableCompositors)
+	nvidia := f.hasNvidia && !(f.secureBoot && !f.sbctlSigned)
+	aur := true
+	if f.distro != nil && f.distro.id == "fedora" {
+		nvidia = false
+		aur = false
+	}
+	p := &plan{
+		nvidia:      nvidia,
+		switchDM:    true,
+		switchNet:   true,
+		rivals:      true,
+		softOff:     true,
+		aur:         aur,
+		omarchy:     f.omarchyRepo || f.omarchyMirror || len(f.omarchyGuards) > 0,
+		monPins:     len(f.monOutputs) > 0,
+		greeter:     !f.kdeSddmConf,
+		resume:      f.prevRun != nil,
+		compositor:  compositor,
+		browser:     installerplan.FreshDefault(installerplan.Browser),
+		shell:       shell,
+		fileManager: fileManager,
+		edition:     edition.choices,
+		components:  map[string]*bool{},
+	}
+	for id, selected := range edition.choices.DefaultComponents() {
+		value := selected
+		p.components[id] = &value
+	}
+	return p
+}
+
+func defaultPlanForEdition(f *facts, edition editionCompositorPlan) *plan {
+	return defaultPlanWithEdition(f, edition)
+}
+
+func validateBrowser(choice string) error {
+	if _, ok := installerplan.ChoiceByID(installerplan.Browser, choice); !ok {
+		return fmt.Errorf(i18n.T("unknown browser %q; choose one of: %s"), choice, strings.Join(browserChoices, ", "))
+	}
+	return nil
+}
+
+func validateLoginShell(choice string) error {
+	if _, ok := installerplan.ChoiceByID(installerplan.LoginShell, choice); !ok {
+		return fmt.Errorf(i18n.T("unknown shell %q; choose one of: %s"), choice, strings.Join(loginShellChoices, ", "))
+	}
+	return nil
+}
+
+func validateFileManager(choice string) error {
+	if _, ok := installerplan.ChoiceByID(installerplan.FileManager, choice); !ok {
+		return fmt.Errorf(i18n.T("unknown file manager %q; choose one of: %s"), choice, strings.Join(fileManagerChoices, ", "))
+	}
+	return nil
+}
+
+func applyPlanChoices(p *plan, browser, shell, fileManager string) {
+	if browser != "" {
+		p.browser = browser
+	}
+	if shell != "" {
+		p.shell = shell
+	}
+	if fileManager != "" {
+		p.fileManager = fileManager
+	}
+	if p.browser == "zen" {
+		p.aur = true
 	}
 }
 
-// compositors lists the window managers with a shipped variant package, in
-// wm.Providers order. --compositor picks one; the default is the first. The
-// verify and package steps read plan.compositor, so a pick flows end to end.
-func compositors() []string {
-	return wm.Providers()
-}
+// devToolchainGroup is the catalogue group the Developer toolchain toggle owns:
+// on an existing box it stays opt-in, as it was before the shared catalogue.
+const devToolchainGroup = "developer"
 
-// wmBinary maps a provider to the compositor executable it drives, which is how
-// a box answers "is this window manager actually here?". Void packages niri but
-// not hyprland, so the pick follows what the machine can run.
-var wmBinary = map[string]string{"hyprland": "hyprland", "niri": "niri"}
-
-// availableCompositors drops the providers whose compositor is not installed,
-// so the default pick and the offered list are ones the box can actually run.
-// Never returns empty: the first provider always stays as the hand-build option.
-func availableCompositors() []string {
-	all := compositors()
-	var ok []string
-	for _, c := range all {
-		if bin, known := wmBinary[c]; known && !has(bin) {
-			continue
+func (p *plan) componentOn(id string) bool {
+	if availability, ok := p.edition.Component(id); ok {
+		if availability.Locked {
+			return true
 		}
-		ok = append(ok, c)
+		if availability.Component.Group == devToolchainGroup {
+			return p.devtools
+		}
 	}
-	if len(ok) == 0 {
-		return all
+	if selected := p.components[id]; selected != nil {
+		return *selected
 	}
-	return ok
+	return false
+}
+
+func (p *plan) setComponent(id string, selected bool) {
+	if p.components == nil {
+		p.components = map[string]*bool{}
+	}
+	if current := p.components[id]; current != nil {
+		*current = selected
+		return
+	}
+	value := selected
+	p.components[id] = &value
+}
+
+func (p *plan) componentSelections() map[string]bool {
+	selected := make(map[string]bool, len(p.components))
+	for id, value := range p.components {
+		selected[id] = value != nil && *value
+	}
+	// Leaving the toolchain off is not a removal, so it never reaches the ledger.
+	for _, availability := range p.edition.Components() {
+		if availability.Component.Group == devToolchainGroup {
+			selected[availability.Component.ID] = true
+		}
+	}
+	return selected
+}
+
+func (p *plan) choiceEdition() installerplan.EditionPlan {
+	if p.edition.Edition == "" {
+		return installerplan.ResolveSource("Arch")
+	}
+	return p.edition
+}
+
+func choiceDropPackages(p *plan) []string {
+	browser, shell, fileManager := p.browser, p.shell, p.fileManager
+	if browser == "" {
+		browser = installerplan.FreshDefault(installerplan.Browser)
+	}
+	if shell == "" {
+		shell = installerplan.FreshDefault(installerplan.LoginShell)
+	}
+	if fileManager == "" {
+		fileManager = installerplan.FreshDefault(installerplan.FileManager)
+	}
+	drop := installerplan.DropPackages(browser, shell)
+	drop = append(drop, installerplan.DropPackagesFor(installerplan.FileManager, fileManager)...)
+	drop = append(drop, p.choiceEdition().DropComponentPackages(p.componentSelections())...)
+	return uniquePackages(drop)
+}
+
+func filterChoicePackages(pkgs []string, p *plan) []string {
+	drop := map[string]bool{}
+	for _, pkg := range choiceDropPackages(p) {
+		drop[pkg] = true
+	}
+	out := make([]string, 0, len(pkgs))
+	for _, pkg := range pkgs {
+		if !drop[pkg] {
+			out = append(out, pkg)
+		}
+	}
+	return out
 }
 
 // monitorPinFile is the hand-pinned display file for a compositor, relative to
@@ -221,18 +491,29 @@ type engine struct {
 	prevBackups     int
 	pendingRestore  []string // undo lines queued before restore.sh exists
 	state           *runState
+	freshAccount    bool
+	installedPkg    func(string) bool
 
 	steps []estep
 }
 
 func newEngine(f *facts, p *plan, dry bool, ref, payloadOverride string) *engine {
-	e := &engine{f: f, p: p, dry: dry, ref: ref, payloadOverride: payloadOverride}
+	_, shellErr := os.Stat(filepath.Join(f.homeDir, ".config/ryoku/shell.json"))
+	e := &engine{
+		f: f, p: p, dry: dry, ref: ref, payloadOverride: payloadOverride,
+		freshAccount: !f.ryokuOnBox && os.IsNotExist(shellErr),
+	}
+	e.resolvePayload()
 	e.openLog()
 	// resuming continues the previous run's backup dir so restore.sh stays
 	// one script; declining starts a fresh state (the file is rewritten at
 	// the first completed step).
 	if p.resume && f.prevRun != nil {
 		e.state = f.prevRun
+		e.state.adoptRef(ref)
+		if e.d().id == "void" {
+			e.state.adoptPackagedVoid()
+		}
 		if f.prevRun.BackupDir != "" {
 			if fi, err := os.Stat(f.prevRun.BackupDir); err == nil && fi.IsDir() {
 				e.backupDir = f.prevRun.BackupDir
@@ -240,38 +521,43 @@ func newEngine(f *facts, p *plan, dry bool, ref, payloadOverride string) *engine
 		}
 	}
 	// repo trust comes before conflict removal on purpose: nothing gets
-	// uninstalled until the [ryoku] db has actually been fetched. legacy
-	// sources go first so the full upgrade already runs on clean mirrors.
-	pacmanOnly := map[string]bool{"legacy": true, "repo": true, "aur": true, "drivers": true}
+	// uninstalled until the Ryoku package database has actually been fetched.
+	// Legacy sources go first on Arch so its full upgrade uses clean mirrors.
+	archOnly := map[string]bool{"legacy": true, "aur": true, "cachyos-layer": true}
+	sourceOnly := map[string]bool{"fonts": true, "build": true}
 	all := []estep{
 		{"legacy", i18n.T("Retiring the previous distro's package sources"), stepLegacy},
 		{"sysupgrade", i18n.T("Updating the system"), stepSysupgrade},
-		{"zrepo", i18n.T("Trusting the z-repo package repository"), stepZRepo},
 		{"tools", i18n.T("Installing installer tools (git, build tools)"), stepTools},
 		{"payload", i18n.T("Fetching the Ryoku payload"), stepPayload},
 		{"backup", i18n.T("Backing up your configs"), stepBackup},
 		{"repo", i18n.T("Trusting the [ryoku] package repository"), stepRepo},
 		{"conflicts", i18n.T("Clearing conflicting shells and daemons"), stepConflicts},
 		{"packages", i18n.T("Installing the Ryoku desktop"), stepPackages},
+		{"cachyos-layer", i18n.T("Adding the CachyOS kernel and tuning"), stepCachyosLayer},
+		{"fonts", i18n.T("Installing Ryoku fonts and cursors"), stepFonts},
 		{"drivers", i18n.T("Setting up GPU drivers"), stepDrivers},
 		{"build", i18n.T("Building the Ryoku desktop from source"), stepBuild},
 		{"session", i18n.T("Wiring the login session (SDDM, network)"), stepSession},
 		{"configs", i18n.T("Laying down your Ryoku configs"), stepConfigs},
 		{"aur", i18n.T("Building the AUR extras"), stepAUR},
-		{"shell", i18n.T("Switching your login shell to fish"), stepFish},
+		{"shell", i18n.T("Setting your browser and login shell"), stepLoginShell},
 		{"doctor", i18n.T("Converging the system (ryoku doctor)"), stepDoctor},
 		{"verify", i18n.T("Verifying the install"), stepVerify},
 	}
 	src := f.distro != nil && f.distro.fromSource
+	arch := f.distro == nil || f.distro.id == "arch"
 	for _, s := range all {
-		if src && pacmanOnly[s.id] {
+		if s.id == "cachyos-layer" && !p.componentOn("cachyos-layer") {
 			continue
 		}
-		// z-repo is Void's third-party repo; no other distro carries one.
-		if s.id == "zrepo" && (f.distro == nil || f.distro.zrepoURL == "") {
+		if !arch && archOnly[s.id] {
 			continue
 		}
-		if !src && (s.id == "build" || s.id == "zrepo") {
+		if src && (s.id == "repo" || s.id == "drivers") {
+			continue
+		}
+		if sourceOnly[s.id] && !src {
 			continue
 		}
 		e.steps = append(e.steps, s)
@@ -476,6 +762,183 @@ func (e *engine) sudoWrite(path, content string) error {
 	return nil
 }
 
+const sddmStatePath = "/var/lib/sddm/state.conf"
+
+func compositorWaylandSessionPath(compositor string) string {
+	return filepath.Join("/usr/share/wayland-sessions", compositor+".desktop")
+}
+
+func updateSDDMLastSession(content, session string) string {
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines)+2)
+	inLast := false
+	foundLast := false
+	wroteSession := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			if inLast && !wroteSession {
+				out = append(out, "Session="+session)
+				wroteSession = true
+			}
+			inLast = strings.EqualFold(strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]")), "Last")
+			foundLast = foundLast || inLast
+		}
+		if inLast {
+			key, _, hasValue := strings.Cut(trimmed, "=")
+			if hasValue && strings.EqualFold(strings.TrimSpace(key), "Session") {
+				if !wroteSession {
+					out = append(out, "Session="+session)
+					wroteSession = true
+				}
+				continue
+			}
+		}
+		out = append(out, line)
+	}
+	if foundLast {
+		if !wroteSession {
+			out = append(out, "Session="+session)
+		}
+	} else {
+		for len(out) > 0 && out[len(out)-1] == "" {
+			out = out[:len(out)-1]
+		}
+		if len(out) > 0 {
+			out = append(out, "")
+		}
+		out = append(out, "[Last]", "Session="+session)
+	}
+	return strings.Join(out, "\n") + "\n"
+}
+
+func sudoPathExists(path string) (bool, error) {
+	err := exec.Command("sudo", "-n", "sh", "-c", `test -e "$1" || exit 3`, "sh", path).Run()
+	if err == nil {
+		return true, nil
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 3 {
+		return false, nil
+	}
+	return false, err
+}
+
+func sudoReadFile(path string) ([]byte, error) {
+	return exec.Command("sudo", "-n", "cat", path).Output()
+}
+
+func (e *engine) configureSDDMLastSessionAt(statePath, sessionPath string) error {
+	if !e.p.switchDM {
+		return nil
+	}
+	if e.dry {
+		e.say(i18n.Tf("DRYRUN: set SDDM's remembered session to %s", sessionPath))
+		return nil
+	}
+	if e.backupDir == "" {
+		return errors.New(i18n.T("cannot preserve SDDM state without an install backup directory"))
+	}
+	backup := filepath.Join(e.backupDir, "sddm-state.conf")
+	absent := filepath.Join(e.backupDir, "sddm-state.absent")
+	_, backupErr := os.Stat(backup)
+	_, absentErr := os.Stat(absent)
+	if errors.Is(backupErr, os.ErrNotExist) && errors.Is(absentErr, os.ErrNotExist) {
+		exists, err := sudoPathExists(statePath)
+		if err != nil {
+			return fmt.Errorf(i18n.T("inspect SDDM state: %w"), err)
+		}
+		if exists {
+			if err := e.sudo("cp", "-a", statePath, backup); err != nil {
+				return err
+			}
+		} else if err := os.WriteFile(absent, nil, 0o600); err != nil {
+			return err
+		}
+	} else if backupErr != nil && !errors.Is(backupErr, os.ErrNotExist) {
+		return backupErr
+	} else if absentErr != nil && !errors.Is(absentErr, os.ErrNotExist) {
+		return absentErr
+	}
+
+	var current []byte
+	exists, err := sudoPathExists(statePath)
+	if err != nil {
+		return fmt.Errorf(i18n.T("inspect SDDM state: %w"), err)
+	}
+	if exists {
+		current, err = sudoReadFile(statePath)
+		if err != nil {
+			return fmt.Errorf(i18n.T("read SDDM state: %w"), err)
+		}
+	}
+	tmp, err := os.CreateTemp(e.backupDir, "sddm-state-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.WriteString(updateSDDMLastSession(string(current), sessionPath)); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := e.sudo("install", "-Dm600", "-o", "sddm", "-g", "sddm", tmpPath, statePath); err != nil {
+		return err
+	}
+	if _, err := os.Stat(absent); err == nil {
+		e.recordRestore("sudo rm -f " + fmt.Sprintf("%q", statePath))
+	} else {
+		e.recordRestore(`sudo install -Dm600 -o sddm -g sddm "$DIR/sddm-state.conf" ` + fmt.Sprintf("%q", statePath))
+	}
+	return nil
+}
+
+func (e *engine) configureSDDMLastSession() error {
+	return e.configureSDDMLastSessionAt(sddmStatePath, compositorWaylandSessionPath(e.p.compositor))
+}
+
+func (e *engine) configureSDDMMainTheme(enabled bool) error {
+	const path = "/etc/sddm.conf"
+	original, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	next, changed := updateRyokuSDDMMainTheme(string(original), enabled)
+	if !changed {
+		return nil
+	}
+	if enabled && !e.dry {
+		if e.backupDir == "" {
+			return errors.New(i18n.T("cannot preserve /etc/sddm.conf without an install backup directory"))
+		}
+		backup := filepath.Join(e.backupDir, "sddm.conf")
+		if _, statErr := os.Stat(backup); errors.Is(statErr, os.ErrNotExist) {
+			if err := os.WriteFile(backup, original, 0o644); err != nil {
+				return err
+			}
+		} else if statErr != nil {
+			return statErr
+		}
+	}
+	if err := e.sudoWrite(path, next); err != nil {
+		return err
+	}
+	if enabled {
+		e.recordRestore(`sudo cp "$DIR/sddm.conf" /etc/sddm.conf`)
+	}
+	return nil
+}
+
 // stripPacmanSection drops one [section] and its body from pacman.conf text.
 func stripPacmanSection(conf, section string) string {
 	var out []string
@@ -558,62 +1021,89 @@ func stepSysupgrade(e *engine) error {
 			return err
 		}
 	}
+	if d.id == "void" {
+		if err := e.sudo(append(append([]string{}, d.updateCmd...), "xbps")...); err != nil {
+			return err
+		}
+	}
 	return e.sudo(d.updateCmd...)
 }
 
 func stepTools(e *engine) error {
 	d := e.d()
-	return e.sudo(d.installArgs([]string{"git", d.local("base-devel")})...)
-}
-
-// stepZRepo trusts the Z Linux binary repository on Void: the signed XBPS repo
-// that carries what Void's official repos do not (verified against its stable
-// repodata). Written as a plain /etc/xbps.d file, so the next sync picks it up;
-// xbps imports the RSA key from the signed index-meta into
-// /var/db/xbps/keys on that first sync, which is what makes the packages below
-// verify. No-op off Void.
-func stepZRepo(e *engine) error {
-	d := e.d()
-	if d.zrepoURL == "" {
-		return nil
-	}
-	path := "/etc/xbps.d/20-ryoku-void.conf"
-	if !e.dry {
-		if err := e.sudo("mkdir", "-p", "/etc/xbps.d"); err != nil {
-			return err
+	pkgs := []string{"git"}
+	if d.id == "fedora" {
+		pkgs = append(pkgs, "gnupg2")
+		if filepath.Base(d.installCmd[0]) == "dnf" {
+			pkgs = append(pkgs, "dnf-plugins-core")
 		}
+	} else if d.id != "void" {
+		pkgs = append(pkgs, d.local("base-devel"))
 	}
-	if err := e.sudoWrite(path, "repository="+d.zrepoURL+"\n"); err != nil {
-		return err
-	}
-	e.recordRestore("sudo rm -f " + path)
-	e.say(i18n.Tf("z-repo enabled (%s); its signing key is imported on the next sync", d.zrepoURL))
-	if e.dry {
-		return nil
-	}
-	// the sync is what fetches the index and stores the key. a failure here
-	// leaves the file in place, so the package step below still finds whatever
-	// z-repo can serve; the official repos are unaffected either way.
-	if err := e.sudo(d.refreshCmd...); err != nil {
-		e.say(i18n.T("warning: could not sync z-repo yet; its packages may be missing from this run (continuing)"))
-	}
-	return nil
+	return e.sudo(d.installArgs(pkgs)...)
 }
 
-func stepPayload(e *engine) error {
+// resolvePayload anchors the payload checkout path. It runs when the engine is
+// built, not only when the fetch step runs: a resume skips the completed
+// payload step, and every later step joins e.payload to find scripts. Source
+// installs use the durable checkout that deploy.sh records for `ryoku update`;
+// packaged installs retain a throwaway sparse payload cache.
+func (e *engine) resolvePayload() {
 	if e.payloadOverride != "" {
 		e.payload = e.payloadOverride
-		if _, err := os.Stat(filepath.Join(e.payload, "ryoku/lockscreen/install-qylock")); err != nil && !e.dry {
-			return errors.New(i18n.Tf("payload override %s does not look like a ryoku checkout", e.payload))
-		}
-		e.say(i18n.Tf("using payload checkout %s", e.payload))
-		return nil
+		return
+	}
+	if e.d().fromSource {
+		e.payload = filepath.Join(e.f.homeDir, "ryoku-arch")
+		return
 	}
 	cache := os.Getenv("XDG_CACHE_HOME")
 	if cache == "" {
 		cache = filepath.Join(e.f.homeDir, ".cache")
 	}
 	e.payload = filepath.Join(cache, "ryoku-shell-install/repo")
+}
+
+func (e *engine) payloadSparsePaths() []string {
+	switch e.d().id {
+	case "void", "fedora":
+		return append(append([]string{}, sparsePaths...), "system/packages", e.d().id+"/packages")
+	default:
+		return sparsePaths
+	}
+}
+
+func stepPayload(e *engine) error {
+	if e.payloadOverride != "" {
+		if _, err := os.Stat(filepath.Join(e.payload, "ryoku/lockscreen/install-qylock")); err != nil && !e.dry {
+			return errors.New(i18n.Tf("payload override %s does not look like a ryoku-arch checkout", e.payload))
+		}
+		e.say(i18n.Tf("using payload checkout %s", e.payload))
+		return nil
+	}
+
+	if e.d().fromSource {
+		if _, err := os.Stat(filepath.Join(e.payload, ".git")); err == nil {
+			if err := e.cmd(e.payload, nil, "git", "remote", "set-url", "origin", repoURL); err != nil {
+				return err
+			}
+			if err := e.cmd(e.payload, nil, "git", "fetch", "--prune", "origin", e.ref); err != nil {
+				return err
+			}
+			if _, err := os.Stat(filepath.Join(e.payload, ".git", "info", "sparse-checkout")); err == nil {
+				if err := e.cmd(e.payload, nil, "git", "sparse-checkout", "disable"); err != nil {
+					return err
+				}
+			}
+			return e.cmd(e.payload, nil, "git", "checkout", "-f", "FETCH_HEAD")
+		}
+		if !e.dry {
+			if err := os.MkdirAll(filepath.Dir(e.payload), 0o755); err != nil {
+				return err
+			}
+		}
+		return e.cmd("", nil, "git", "clone", "--filter=blob:none", "--branch", e.ref, repoURL, e.payload)
+	}
 
 	if _, err := os.Stat(filepath.Join(e.payload, ".git")); err == nil {
 		if err := e.cmd(e.payload, nil, "git", "fetch", "--depth=1", "origin", e.ref); err != nil {
@@ -633,12 +1123,17 @@ func stepPayload(e *engine) error {
 			return err
 		}
 	}
-	if err := e.cmd(e.payload, nil, "git", append([]string{"sparse-checkout", "set"}, sparsePaths...)...); err != nil {
+	paths := e.payloadSparsePaths()
+	if err := e.cmd(e.payload, nil, "git", append([]string{"sparse-checkout", "set"}, paths...)...); err != nil {
 		return err
 	}
 	// a cache from an older installer can come out of the update missing paths
 	// the current engine needs; a broken cache is worth less than a fresh clone.
-	if _, err := os.Stat(filepath.Join(e.payload, "system/packages/base.packages")); err != nil && !e.dry {
+	required := filepath.Join(e.payload, "system/packages/base.packages")
+	if e.d().id == "void" || e.d().id == "fedora" {
+		required = filepath.Join(e.payload, "system/packages/resolve")
+	}
+	if _, err := os.Stat(required); err != nil && !e.dry {
 		e.say(i18n.T("payload cache is incomplete; recloning it fresh"))
 		if err := os.RemoveAll(e.payload); err != nil {
 			return err
@@ -647,7 +1142,7 @@ func stepPayload(e *engine) error {
 			"--branch", e.ref, repoURL, e.payload); err != nil {
 			return err
 		}
-		return e.cmd(e.payload, nil, "git", append([]string{"sparse-checkout", "set"}, sparsePaths...)...)
+		return e.cmd(e.payload, nil, "git", append([]string{"sparse-checkout", "set"}, paths...)...)
 	}
 	return nil
 }
@@ -777,7 +1272,19 @@ func stepConflicts(e *engine) error {
 	// stop: running daemons die with the old session.
 	if e.p.softOff {
 		for _, u := range e.f.softUnits {
-			e.softOffUser(u)
+			if e.usesRunit() {
+				service := filepath.Join(e.f.homeDir, ".config/service", runitServiceName(u))
+				if err := e.cmd("", nil, "rm", "-rf", service); err != nil {
+					e.say(i18n.Tf("warning: could not disable %s", u))
+				}
+				continue
+			}
+			if err := e.cmd("", nil, "systemctl", "--user", "disable", u); err != nil {
+				e.say(i18n.Tf("warning: could not disable %s", u))
+				continue
+			}
+			// || true: add-wants units have no [Install] and refuse a bare enable
+			e.recordRestore("systemctl --user enable " + u + " || true")
 		}
 	}
 	if e.p.rivals && len(e.f.rivalPkgs) > 0 {
@@ -794,28 +1301,18 @@ func stepConflicts(e *engine) error {
 			}
 		}
 	}
-	if len(e.f.zshFrameworkPkgs) > 0 {
+	if e.d().id == "arch" && e.p.shell == "zsh" && len(e.f.zshFrameworkPkgs) > 0 {
 		// ryoku-oh-my-zsh provides and replaces both upstream frameworks, but a
 		// plain -R under --noconfirm refuses while an installed plugin package
 		// depends on oh-my-zsh-git, and the dependency conflict then aborts the
 		// whole desktop transaction. -Rdd drops the framework alone; its plugins
 		// re-resolve against ryoku-oh-my-zsh's provides in the install step.
 		e.say(i18n.Tf("replacing %s with the Ryoku zsh framework", strings.Join(e.f.zshFrameworkPkgs, " ")))
-		// -Rdd is pacman-specific (drop the framework alone so its plugins
-		// re-resolve); every other manager gets a plain removal.
-		rmArgs := e.d().removeArgs(e.f.zshFrameworkPkgs)
-		if e.d().id == "arch" {
-			rmArgs = append([]string{"pacman", "-Rdd", "--noconfirm"}, e.f.zshFrameworkPkgs...)
-		}
-		if err := e.sudo(rmArgs...); err != nil {
+		if err := e.sudo(append([]string{"pacman", "-Rdd", "--noconfirm"}, e.f.zshFrameworkPkgs...)...); err != nil {
 			e.say(i18n.Tf("warning: could not remove %s; the package step may abort on a dependency conflict", strings.Join(e.f.zshFrameworkPkgs, " ")))
 		} else {
 			for _, p := range e.f.zshFrameworkPkgs {
-				if e.d().id == "arch" {
-					e.recordRestore("sudo pacman -S --asdeps " + p)
-				} else {
-					e.recordRestore("sudo " + strings.Join(e.d().installCmd, " ") + " " + p)
-				}
+				e.recordRestore("sudo pacman -S --asdeps " + p)
 			}
 		}
 	}
@@ -835,7 +1332,341 @@ func stepConflicts(e *engine) error {
 	return nil
 }
 
+func voidKeyringSource(e *engine) string {
+	if dir := os.Getenv("RYOKU_XBPS_KEYRING_DIR"); dir != "" {
+		return dir
+	}
+	return filepath.Join(e.payload, "void/packages/srcpkgs/ryoku-keyring/files")
+}
+
+func voidKeyPlists(e *engine) ([]string, error) {
+	dir := voidKeyringSource(e)
+	plists, err := filepath.Glob(filepath.Join(dir, "*.plist"))
+	if err != nil {
+		return nil, fmt.Errorf("read XBPS keyring %s: %w", dir, err)
+	}
+	if len(plists) == 0 && !e.dry {
+		return nil, fmt.Errorf("XBPS keyring %s contains no .plist keys", dir)
+	}
+	return plists, nil
+}
+
+func stepVoidRepo(e *engine) error {
+	plists, err := voidKeyPlists(e)
+	if err != nil {
+		return err
+	}
+	if len(plists) == 0 {
+		e.say(i18n.Tf("DRYRUN: seed XBPS key plists from %s into %s", voidKeyringSource(e), voidTrustedKeyDir))
+	}
+	for _, plist := range plists {
+		dst := filepath.Join(voidTrustedKeyDir, filepath.Base(plist))
+		if err := e.sudo("install", "-Dm644", plist, dst); err != nil {
+			return err
+		}
+	}
+
+	channel, repository, writeOverride := voidRepository(e.ref)
+	if strings.ContainsAny(repository, "\r\n") ||
+		!filepath.IsAbs(repository) && !strings.Contains(repository, "://") {
+		return fmt.Errorf("invalid RYOKU_XBPS_REPO %q: expected a URL or absolute path", repository)
+	}
+	if writeOverride {
+		if err := e.sudo("mkdir", "-p", filepath.Dir(voidRepoConfig)); err != nil {
+			return err
+		}
+		if err := e.sudoWrite(voidRepoConfig, "repository="+repository+"\n"); err != nil {
+			return err
+		}
+		if err := e.sudo("chmod", "644", voidRepoConfig); err != nil {
+			return err
+		}
+		e.say(i18n.Tf("configured the Ryoku XBPS repository (%s channel) in %s", channel, voidRepoConfig))
+	} else {
+		if err := e.sudo("rm", "-f", voidRepoConfig); err != nil {
+			return err
+		}
+		e.say(i18n.T("using the stable Ryoku XBPS repository; ryoku-keyring will install its system default"))
+	}
+
+	if err := e.sudoSh(`umask 022 && mkdir -p /var/lib/ryoku && ` +
+		`printf '%s\n' '` + channel + `' > /var/lib/ryoku/channel-intent.new && ` +
+		`mv -f /var/lib/ryoku/channel-intent.new /var/lib/ryoku/channel-intent`); err != nil {
+		return err
+	}
+	if writeOverride {
+		return e.sudo("xbps-install", "-S")
+	}
+	return e.sudo("xbps-install", "--repository", repository, "-S")
+}
+
+type fedoraCopr struct {
+	project     string
+	includepkgs string
+}
+
+func rpmPrimaryFingerprint(colons string) (string, error) {
+	var fingerprints []string
+	primaryCount := 0
+	wantFingerprint := false
+	for _, line := range strings.Split(colons, "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) < 10 {
+			continue
+		}
+		switch fields[0] {
+		case "pub":
+			primaryCount++
+			wantFingerprint = true
+		case "fpr":
+			if wantFingerprint {
+				fingerprints = append(fingerprints, strings.ToUpper(fields[9]))
+				wantFingerprint = false
+			}
+		case "sub":
+			wantFingerprint = false
+		}
+	}
+	if primaryCount != 1 || len(fingerprints) != 1 {
+		return "", fmt.Errorf(i18n.T("release key contains %d primary keys; expected exactly one"), primaryCount)
+	}
+	if fingerprints[0] != fedoraKeyFingerprint {
+		return "", fmt.Errorf(i18n.T("release key fingerprint is %s; expected %s"), fingerprints[0], fedoraKeyFingerprint)
+	}
+	return fingerprints[0], nil
+}
+
+func verifyRPMKey(keyPath, home, exportPath string) error {
+	importCmd := exec.Command("gpg", "--batch", "--homedir", home, "--import-options", "import-minimal", "--import", keyPath)
+	if out, err := importCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf(i18n.T("import release key: %w: %s"), err, strings.TrimSpace(string(out)))
+	}
+	listCmd := exec.Command("gpg", "--batch", "--homedir", home, "--with-colons", "--fingerprint", "--list-keys")
+	out, err := listCmd.Output()
+	if err != nil {
+		return fmt.Errorf(i18n.T("inspect release key: %w"), err)
+	}
+	fingerprint, err := rpmPrimaryFingerprint(string(out))
+	if err != nil {
+		return err
+	}
+	exportCmd := exec.Command("gpg", "--batch", "--homedir", home, "--armor", "--export", fingerprint)
+	cert, err := exportCmd.Output()
+	if err != nil {
+		return fmt.Errorf(i18n.T("export release key: %w"), err)
+	}
+	if len(cert) == 0 {
+		return errors.New(i18n.T("exported release key is empty"))
+	}
+	return os.WriteFile(exportPath, cert, 0o644)
+}
+
+func readFedoraCoprs(path string) ([]fedoraCopr, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	validPart := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+	validPkg := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9+_.-]*$`)
+	var rows []fedoraCopr
+	header := false
+	seen := map[string]bool{}
+	for lineNo, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if !header {
+			header = true
+			if line != "copr\tincludepkgs\twhy" {
+				return nil, fmt.Errorf(i18n.T("%s:%d: expected copr, includepkgs, why header"), path, lineNo+1)
+			}
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != 3 {
+			return nil, fmt.Errorf(i18n.T("%s:%d: expected three tab-separated columns"), path, lineNo+1)
+		}
+		parts := strings.Split(fields[0], "/")
+		if len(parts) != 2 || !validPart.MatchString(parts[0]) || !validPart.MatchString(parts[1]) {
+			return nil, fmt.Errorf(i18n.T("%s:%d: invalid COPR project %q"), path, lineNo+1, fields[0])
+		}
+		if seen[fields[0]] {
+			return nil, fmt.Errorf(i18n.T("%s:%d: duplicate COPR project %q"), path, lineNo+1, fields[0])
+		}
+		seen[fields[0]] = true
+		if fields[1] == "" || fields[2] == "" {
+			return nil, fmt.Errorf(i18n.T("%s:%d: includepkgs and why are required"), path, lineNo+1)
+		}
+		for _, pkg := range strings.Fields(fields[1]) {
+			if !validPkg.MatchString(pkg) {
+				return nil, fmt.Errorf(i18n.T("%s:%d: invalid package name %q"), path, lineNo+1, pkg)
+			}
+		}
+		rows = append(rows, fedoraCopr{project: fields[0], includepkgs: fields[1]})
+	}
+	if !header {
+		return nil, fmt.Errorf(i18n.T("%s: missing header"), path)
+	}
+	return rows, nil
+}
+
+func fedoraCoprSlug(project string) string {
+	return strings.ReplaceAll(project, "/", "-")
+}
+
+func fedoraCoprContent(row fedoraCopr) string {
+	slug := fedoraCoprSlug(row.project)
+	base := "https://download.copr.fedorainfracloud.org/results/" + row.project
+	return "[ryoku-copr-" + slug + "]\n" +
+		"name=Ryoku dependency: " + row.project + "\n" +
+		"baseurl=" + base + "/fedora-$releasever-$basearch/\n" +
+		"enabled=1\n" +
+		"gpgcheck=1\n" +
+		"repo_gpgcheck=0\n" +
+		"gpgkey=" + base + "/pubkey.gpg\n" +
+		"includepkgs=" + row.includepkgs + "\n" +
+		"skip_if_unavailable=1\n"
+}
+
+func verifyFedoraRepoReadable(e *engine) error {
+	dnf := e.d().installCmd[0]
+	query := []string{dnf, "repoquery", "--repo=ryoku", "-q", "ryoku"}
+	if e.dry {
+		return e.sudo(query...)
+	}
+	sudoArgs := append([]string{"-n"}, sudoArgv(query, false)...)
+	e.say("$ " + shellJoin("sudo", sudoArgs))
+	cmd := exec.Command("sudo", sudoArgs...)
+	out, err := cmd.CombinedOutput()
+	found := false
+	for _, raw := range strings.Split(string(out), "\n") {
+		line := cleanTermLine(raw)
+		if line == "" {
+			continue
+		}
+		e.say("  " + line)
+		fields := strings.Fields(line)
+		if len(fields) > 0 && (fields[0] == "ryoku" ||
+			strings.HasPrefix(fields[0], "ryoku-") ||
+			strings.HasPrefix(fields[0], "ryoku.")) {
+			found = true
+		}
+	}
+	if err != nil {
+		return fmt.Errorf(i18n.T("Ryoku RPM repository query failed: %w"), err)
+	}
+	if !found {
+		return errors.New(i18n.T("Ryoku RPM repository is not trusted or does not publish the ryoku package"))
+	}
+	return nil
+}
+
+func stepFedoraRepo(e *engine) error {
+	channel, repository := fedoraRepository(e.ref)
+	if strings.ContainsAny(repository, "\r\n") ||
+		!filepath.IsAbs(repository) && !strings.Contains(repository, "://") {
+		return fmt.Errorf(i18n.T("invalid RYOKU_RPM_REPO %q: expected a URL or absolute path"), repository)
+	}
+	keyURL := envOr("RYOKU_RPM_KEY_URL", fedoraKeyURL)
+	if !strings.HasPrefix(keyURL, "https://") || strings.ContainsAny(keyURL, " \t\r\n") {
+		return fmt.Errorf(i18n.T("invalid RYOKU_RPM_KEY_URL %q: expected an HTTPS URL"), keyURL)
+	}
+
+	work := filepath.Join(os.TempDir(), "ryoku-rpm-key")
+	if !e.dry {
+		var err error
+		work, err = os.MkdirTemp("", "ryoku-rpm-key-*")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(work)
+		if err := os.Chmod(work, 0o700); err != nil {
+			return err
+		}
+	}
+	download := filepath.Join(work, "release-key.asc")
+	verified := filepath.Join(work, "RPM-GPG-KEY-ryoku")
+	if err := e.cmd("", nil, "curl", "--fail", "--location", "--retry", "3",
+		"--proto", "=https", "--proto-redir", "=https", "--output", download, keyURL); err != nil {
+		return err
+	}
+	if e.dry {
+		e.say(i18n.Tf("DRYRUN: verify the release key has exactly fingerprint %s", fedoraKeyFingerprint))
+	} else {
+		gnupg := filepath.Join(work, "gnupg")
+		if err := os.Mkdir(gnupg, 0o700); err != nil {
+			return err
+		}
+		if err := verifyRPMKey(download, gnupg, verified); err != nil {
+			return err
+		}
+	}
+	if err := e.sudo("install", "-Dm644", verified, fedoraKeyPath); err != nil {
+		return err
+	}
+	if err := e.sudo("rpm", "--import", fedoraKeyPath); err != nil {
+		return err
+	}
+
+	repoPath := fedoraRepoConfigPath()
+	if err := e.sudo("mkdir", "-p", filepath.Dir(repoPath), fedoraRepoDir); err != nil {
+		return err
+	}
+	if err := e.sudoWrite(repoPath, fedoraRepoContent(repository)); err != nil {
+		return err
+	}
+	if err := e.sudo("chmod", "644", repoPath); err != nil {
+		return err
+	}
+
+	coprTable := filepath.Join(e.payload, "fedora/packages/coprs.tsv")
+	rows, err := readFedoraCoprs(coprTable)
+	if err != nil {
+		if !e.dry {
+			return fmt.Errorf(i18n.T("read Fedora COPR table: %w"), err)
+		}
+		e.say(i18n.T("DRYRUN: payload not cloned; would write the restricted Fedora COPR repositories"))
+		rows = nil
+	}
+	wanted := map[string]bool{}
+	for _, row := range rows {
+		path := filepath.Join(fedoraRepoDir, "ryoku-copr-"+fedoraCoprSlug(row.project)+".repo")
+		wanted[path] = true
+		if err := e.sudoWrite(path, fedoraCoprContent(row)); err != nil {
+			return err
+		}
+		if err := e.sudo("chmod", "644", path); err != nil {
+			return err
+		}
+	}
+	if old, _ := filepath.Glob(filepath.Join(fedoraRepoDir, "ryoku-copr-*.repo")); len(old) > 0 {
+		for _, path := range old {
+			if !wanted[path] {
+				if err := e.sudo("rm", "-f", path); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if err := e.sudoSh(`umask 022 && mkdir -p /var/lib/ryoku && ` +
+		`printf '%s\n' '` + channel + `' > /var/lib/ryoku/channel-intent.new && ` +
+		`mv -f /var/lib/ryoku/channel-intent.new /var/lib/ryoku/channel-intent`); err != nil {
+		return err
+	}
+	e.say(i18n.Tf("configured the signed Ryoku RPM repository (%s channel) in %s", channel, repoPath))
+	if err := e.sudo(e.d().refreshCmd...); err != nil {
+		return err
+	}
+	return verifyFedoraRepoReadable(e)
+}
+
 func stepRepo(e *engine) error {
+	if e.d().id == "void" {
+		return stepVoidRepo(e)
+	}
+	if e.d().id == "fedora" {
+		return stepFedoraRepo(e)
+	}
 	// on a box that already has ryoku-keyring, the keyring files under
 	// /usr/share/pacman/keyrings are package-owned: seeding and deleting them
 	// again would strip files out of the installed package. the trustdb is
@@ -860,6 +1691,7 @@ func stepRepo(e *engine) error {
 		}
 	}
 
+	channel, server := channelForRef(e.ref)
 	conf, err := os.ReadFile("/etc/pacman.conf")
 	if err != nil {
 		return err
@@ -872,14 +1704,35 @@ func stepRepo(e *engine) error {
 		// invoking user's umask (sudo propagates it), and a umask-077 box would
 		// flip pacman.conf to 0600, breaking every non-root pacman reader,
 		// including this installer's own resume read above.
-		if err := e.sudoSh(`{ cat /etc/pacman.conf && printf '%s' '` + pacmanStanza + `'; } > /etc/pacman.conf.ryoku-new && ` +
+		if err := e.sudoSh(`{ cat /etc/pacman.conf && printf '%s' '` + pacmanStanza(server) + `'; } > /etc/pacman.conf.ryoku-new && ` +
 			`chmod 644 /etc/pacman.conf.ryoku-new && ` +
 			`mv -f /etc/pacman.conf.ryoku-new /etc/pacman.conf`); err != nil {
 			return err
 		}
-		e.say(i18n.T("added the [ryoku] repository to /etc/pacman.conf"))
-	} else {
+		e.say(i18n.Tf("added the [ryoku] repository (%s channel) to /etc/pacman.conf", channel))
+	} else if next, cur := setRyokuServer(string(conf), server); cur == server {
 		e.say(i18n.T("[ryoku] repository already present in /etc/pacman.conf"))
+	} else if cur == stableServer || cur == testingServer {
+		// a rerun from the other branch (or a box that ran the other script
+		// first) moves between Ryoku's own channels; a private mirror or a
+		// release pin is someone's deliberate choice and stays.
+		if err := e.sudoWrite("/etc/pacman.conf.ryoku-new", next); err != nil {
+			return err
+		}
+		if err := e.sudoSh(`chmod 644 /etc/pacman.conf.ryoku-new && mv -f /etc/pacman.conf.ryoku-new /etc/pacman.conf`); err != nil {
+			return err
+		}
+		e.say(i18n.Tf("moved the [ryoku] repository onto the %s channel", channel))
+	} else {
+		e.say(i18n.Tf("[ryoku] repository points at %s; left as it is", cur))
+	}
+	// the channel intent is what `ryoku track` records; it keeps the doctor and
+	// a failed boot-guard revert on the channel this install chose. umask 022:
+	// sudo carries the caller's umask, and /var/lib/ryoku must stay 0755.
+	if err := e.sudoSh(`umask 022 && mkdir -p /var/lib/ryoku && ` +
+		`printf '%s\n' '` + channel + `' > /var/lib/ryoku/channel-intent.new && ` +
+		`mv -f /var/lib/ryoku/channel-intent.new /var/lib/ryoku/channel-intent`); err != nil {
+		return err
 	}
 	// refresh right after the -Syu step, so this cannot strand a partial
 	// upgrade; it only pulls the fresh [ryoku] db.
@@ -907,6 +1760,9 @@ func (e *engine) readBasePackages() ([]string, error) {
 		}
 		pkgs = append(pkgs, ln)
 	}
+	if e.p != nil {
+		pkgs = filterChoicePackages(pkgs, e.p)
+	}
 	return pkgs, nil
 }
 
@@ -919,11 +1775,144 @@ func (e *engine) asusAura() bool {
 // verification runs before the new session exists, and caps answers without a
 // live compositor.
 func (e *engine) providerAnswers() bool {
-	return exec.Command("ryoku-wm-"+e.p.compositor, "caps").Run() == nil
+	bin := e.ryokuTool("ryoku-wm-" + e.p.compositor)
+	return bin != "" && exec.Command(bin, "caps").Run() == nil
+}
+
+func hardwareLanes(f *facts) []string {
+	if f != nil && f.hasNvidia {
+		return []string{"amd", "intel", "nvidia"}
+	}
+	hasAMD, hasIntel := false, false
+	if f != nil {
+		for _, gpu := range f.gpus {
+			switch strings.ToLower(gpu) {
+			case "amdgpu", "radeon":
+				hasAMD = true
+			case "i915", "xe":
+				hasIntel = true
+			}
+		}
+	}
+	switch {
+	case hasAMD:
+		return []string{"amd"}
+	case hasIntel:
+		return []string{"intel"}
+	default:
+		return []string{"vm"}
+	}
+}
+
+// selectedInstallPackages names the chosen packages the edition's own package
+// sets do not carry: the file manager, the Ryoku apps and Rashin. The other
+// catalogue rows only ever remove packages from those sets.
+func selectedInstallPackages(p *plan) []string {
+	var packages []string
+	if choice, ok := installerplan.ChoiceByID(installerplan.FileManager, p.fileManager); ok {
+		packages = append(packages, choice.Packages...)
+	}
+	for _, availability := range p.choiceEdition().Components() {
+		component := availability.Component
+		if !availability.Available || !p.componentOn(component.ID) {
+			continue
+		}
+		if component.Group == "ryoku-apps" || component.Step == installerplan.ComponentRashin {
+			packages = append(packages, component.Packages...)
+		}
+	}
+	return uniquePackages(packages)
+}
+
+func translatedEditionPackages(path string, packages []string) ([]string, error) {
+	wanted := map[string]bool{}
+	for _, pkg := range packages {
+		wanted[pkg] = true
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var translated []string
+	found := map[string]bool{}
+	for lineNo, line := range strings.Split(string(data), "\n") {
+		if lineNo == 0 || strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 || !wanted[fields[0]] {
+			continue
+		}
+		found[fields[0]] = true
+		switch fields[1] {
+		case "-":
+			continue
+		case "@repo":
+			translated = append(translated, fields[0])
+		default:
+			translated = append(translated, strings.Fields(fields[1])...)
+		}
+	}
+	for pkg := range wanted {
+		if !found[pkg] {
+			return nil, fmt.Errorf("translate selected package %s: no row in %s", pkg, path)
+		}
+	}
+	return uniquePackages(translated), nil
+}
+
+func (e *engine) readEditionPackages(edition string) ([]string, error) {
+	resolver := filepath.Join(e.payload, "system", "packages", "resolve")
+	table := filepath.Join(e.payload, edition, "packages", "translations.tsv")
+	if _, err := os.Stat(resolver); err != nil && e.dry {
+		e.say(i18n.Tf("DRYRUN: payload not cloned; would resolve the %s package plan", edition))
+		return nil, nil
+	}
+	args := []string{resolver, "--table", table, "--lane", "desktop"}
+	p := e.p
+	if p == nil {
+		p = &plan{browser: "firefox", shell: "fish"}
+	}
+	if p.devtools {
+		args = append(args, "--lane", "dev")
+	}
+	for _, lane := range hardwareLanes(e.f) {
+		args = append(args, "--lane", "hardware:"+lane)
+	}
+	if p.compositor == wm.ProviderHyprland {
+		args = append(args, "--lane", "hyprland")
+	}
+	if edition == "void" {
+		args = append(args, "--session")
+	}
+	for _, provider := range installerplan.IDs(installerplan.Compositor) {
+		if provider != p.compositor {
+			args = append(args, "--drop", "ryoku-desktop-"+provider)
+		}
+	}
+	for _, pkg := range choiceDropPackages(p) {
+		args = append(args, "--drop", pkg)
+	}
+	out, err := exec.Command("sh", args...).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s package plan: %w: %s", edition, err, strings.TrimSpace(string(out)))
+	}
+	selected, err := translatedEditionPackages(table, selectedInstallPackages(p))
+	if err != nil {
+		return nil, err
+	}
+	return uniquePackages(append(strings.Fields(string(out)), selected...)), nil
 }
 
 func stepPackages(e *engine) error {
 	d := e.d()
+	if d.id == "void" || d.id == "fedora" {
+		pkgs, err := e.readEditionPackages(d.id)
+		if err != nil {
+			return err
+		}
+		return installPackagePlan(e, d, pkgs)
+	}
 	base, err := e.readBasePackages()
 	if err != nil {
 		if !e.dry {
@@ -935,7 +1924,7 @@ func stepPackages(e *engine) error {
 	if d.fromSource {
 		// no [ryoku] repository here: the desktop is built from the payload, so
 		// install its dependencies plus the toolchain that builds it.
-		pkgs = append(d.localAll(base), d.build...)
+		pkgs = sourcePackageSet(d, base)
 	} else {
 		pkgs = append(append([]string{}, ryokuPkgs...), base...)
 		// name the chosen variant so pacman installs it directly instead of
@@ -949,12 +1938,26 @@ func stepPackages(e *engine) error {
 			}
 		}
 	}
+	if !d.fromSource {
+		for _, pkg := range selectedInstallPackages(e.p) {
+			if pkg == "localsend-bin" || pkg == "voxtype-bin" {
+				continue
+			}
+			pkgs = append(pkgs, d.local(pkg))
+		}
+	} else if choice, ok := installerplan.ChoiceByID(installerplan.FileManager, e.p.fileManager); ok {
+		pkgs = append(pkgs, d.localAll(choice.Packages)...)
+	}
 	if e.f.ucodePkg != "" {
-		pkgs = append(pkgs, d.local(e.f.ucodePkg))
+		if pkg := d.local(e.f.ucodePkg); pkg != "" {
+			pkgs = append(pkgs, pkg)
+		}
 	}
 	if e.p.devtools {
 		pkgs = append(pkgs, d.localAll(devPkgs)...)
 	}
+	pkgs = filterChoicePackages(pkgs, e.p)
+	pkgs = uniquePackages(pkgs)
 	pkgs = e.dropSatisfied(pkgs)
 	if d.id == "arch" {
 		// a .part resumed against a mirror whose bytes moved on trips pacman's
@@ -965,18 +1968,75 @@ func stepPackages(e *engine) error {
 	}
 	// -Syu, not -S: a resumed run holds the db its first attempt synced, and
 	// a publish in between replaces or prunes the files that db points at.
-	if err := e.sudo(desktopPacmanArgs(d, pkgs)...); err != nil {
-		return err
+	return installPackagePlan(e, d, pkgs)
+}
+
+func cachyosV3Supported() bool {
+	output, err := exec.Command("/lib/ld-linux-x86-64.so.2", "--help").CombinedOutput()
+	return err == nil && strings.Contains(string(output), "x86-64-v3 (supported")
+}
+
+func cachyosMirrorReachable(client *http.Client) bool {
+	request, err := http.NewRequest(http.MethodGet, cachyosMirrorDB, nil)
+	if err != nil {
+		return false
 	}
-	// z-repo extras last and one at a time: a name the repo has dropped (or a
-	// box that never synced it) must not take the desktop transaction with it.
-	// This is the same best-effort lane the AUR extras use on Arch.
-	for _, p := range d.zrepoExtras {
-		if d.installedPkg(p) {
-			continue
+	request.Header.Set("Range", "bytes=0-0")
+	response, err := client.Do(request)
+	if err != nil {
+		return false
+	}
+	response.Body.Close()
+	return response.StatusCode >= 200 && response.StatusCode < 400
+}
+
+func stepCachyosLayer(e *engine) error {
+	availability, ok := e.p.choiceEdition().Component("cachyos-layer")
+	if !ok || !availability.Available || !e.p.componentOn("cachyos-layer") {
+		return nil
+	}
+	if e.dry {
+		e.say(i18n.Tf("DRYRUN: probe %s", cachyosMirrorDB))
+	} else {
+		if !cachyosV3Supported() {
+			e.say(i18n.T("CachyOS layer skipped: this CPU lacks x86-64-v3 support. Install it later from Ryostore > CachyOS Layer."))
+			return nil
 		}
-		if err := e.sudo(d.installArgs([]string{p})...); err != nil {
-			e.say(i18n.Tf("warning: z-repo could not install %s (continuing)", p))
+		client := &http.Client{Timeout: 8 * time.Second}
+		if !cachyosMirrorReachable(client) {
+			e.say(i18n.T("CachyOS layer skipped: the CachyOS mirror is unreachable. Try again from Ryostore > CachyOS Layer."))
+			return nil
+		}
+	}
+	for _, helper := range []string{"ryoku-pkg-cachyos", "ryoku-pkg-multilib"} {
+		path := e.ryokuTool(helper)
+		if path == "" {
+			if e.dry {
+				path = helper
+			} else {
+				return fmt.Errorf(i18n.T("%s is missing from the installed desktop package"), helper)
+			}
+		}
+		if err := e.cmd("", nil, path); err != nil {
+			return err
+		}
+	}
+	args := []string{"pacman", "-Syu", "--needed", "--noconfirm"}
+	args = append(args, availability.Component.Packages...)
+	return e.sudo(args...)
+}
+
+func installPackagePlan(e *engine, d *distro, pkgs []string) error {
+	for _, phase := range d.installPhases(pkgs) {
+		args := desktopPacmanArgs(d, phase)
+		if d.id == "void" {
+			_, repository, writeOverride := voidRepository(e.ref)
+			if !writeOverride {
+				args = append([]string{"xbps-install", "--repository", repository}, args[1:]...)
+			}
+		}
+		if err := e.sudo(args...); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -985,15 +2045,34 @@ func stepPackages(e *engine) error {
 // desktopPacmanArgs builds the package transaction for stepPackages. On Arch it
 // --overwrites the ryoku-desktop-owned paths a prior partial install, a dev
 // deploy, or the ISO installer can leave unowned (ryokuOverwriteGlob), so a
-// resume or a conversion adopts them instead of aborting the whole transaction on
-// "exists in filesystem". fromSource distros build from the payload and never take
-// this path, so they keep the plain install command.
+// resume or conversion adopts them instead of aborting the transaction on
+// "exists in filesystem". Other package managers keep their plain install
+// command.
 func desktopPacmanArgs(d *distro, pkgs []string) []string {
 	args := append([]string{}, d.installCmd...)
 	if d.id == "arch" {
 		args = append(args, "--overwrite", ryokuOverwriteGlob)
 	}
 	return append(args, pkgs...)
+}
+
+func sourcePackageSet(d *distro, base []string) []string {
+	pkgs := append(d.localAll(base), d.build...)
+	pkgs = append(pkgs, d.runtime...)
+	return uniquePackages(pkgs)
+}
+
+func uniquePackages(pkgs []string) []string {
+	out := make([]string, 0, len(pkgs))
+	seen := make(map[string]bool, len(pkgs))
+	for _, pkg := range pkgs {
+		if pkg == "" || seen[pkg] {
+			continue
+		}
+		seen[pkg] = true
+		out = append(out, pkg)
+	}
+	return out
 }
 
 // dropSatisfied keeps only what no installed provider satisfies (pacman -T
@@ -1019,10 +2098,7 @@ func (e *engine) dropSatisfied(pkgs []string) []string {
 	return keep
 }
 
-// stepBuild is the fromSource replacement for installing ryoku-desktop: the
-// payload's deploy.sh already builds the Go programs, the QML modules and the
-// Ryoku.Blobs plugin, then materializes the config. It skips the Hyprland
-// compositor plugins when makepkg is absent, which is the case off Arch.
+// stepBuild is the source-only replacement for installing ryoku-desktop.
 func stepBuild(e *engine) error {
 	script := filepath.Join(e.payload, "ryoku", "shell", "deploy.sh")
 	if e.dry {
@@ -1034,6 +2110,24 @@ func stepBuild(e *engine) error {
 	}
 	e.say(i18n.T("building the desktop from the payload (this takes a few minutes)"))
 	return e.cmd(filepath.Join(e.payload, "ryoku", "shell"), nil, "bash", script)
+}
+
+func fixRunitSessionWrappers(e *engine) error {
+	backupDir := filepath.Join(e.backupDir, "session-wrappers")
+	if e.dry && e.backupDir == "" {
+		backupDir = "<backup>/session-wrappers"
+	} else if e.backupDir == "" {
+		return errors.New(i18n.T("session wrapper repair has no install backup directory"))
+	}
+	host := e.ryokuTool("ryoku-host")
+	if host == "" {
+		host = "ryoku-host"
+	}
+	if err := e.cmd("", nil, host, "session", "fix-wrappers", "--backup-dir", backupDir); err != nil {
+		return err
+	}
+	e.recordRestore(`[ ! -d "$DIR/session-wrappers" ] || cp -a "$DIR/session-wrappers/." /`)
+	return nil
 }
 
 // filterByUnmet keeps only the names pacman -T reported as unmet.
@@ -1054,6 +2148,12 @@ func filterByUnmet(pkgs []string, unmetOut string) []string {
 }
 
 func stepDrivers(e *engine) error {
+	if e.d().id == "fedora" {
+		if e.f.hasNvidia {
+			e.say(i18n.T("Fedora keeps NVIDIA on nouveau in this release; no proprietary driver changes are made."))
+		}
+		return nil
+	}
 	drv := filepath.Join(e.payload, "system/hardware/drivers")
 	scripts := []string{"amd.sh", "intel.sh", "vulkan.sh"}
 	if e.p.nvidia {
@@ -1065,18 +2165,16 @@ func stepDrivers(e *engine) error {
 			e.say(i18n.T("skipping the NVIDIA driver setup (kept nouveau; re-run with the toggle on to switch)"))
 		}
 	}
-	// the vendor scripts each do a bare `pacman -S`, so -- exactly like
-	// stepPackages -- they must transact against a current db. this step is
-	// re-entered on a resume with the sysupgrade/packages steps already
-	// skipped, and a repo publish can land between those steps and this one,
-	// pruning the files a stale db still points at (pacman's "failed
-	// retrieving file" abort that reads as a driver that would not install).
-	// clear resumed .part downloads and bring the system current first.
-	if err := e.sudoSh(`rm -f /var/cache/pacman/pkg/*.part`); err != nil {
-		e.say(i18n.T("warning: could not clear partial downloads (continuing)"))
-	}
-	if err := e.sudo("pacman", "-Syu", "--noconfirm"); err != nil {
-		e.say(i18n.T("warning: could not refresh the package db before the driver install; a stale mirror may still fail a download (continuing)"))
+	if e.d().id == "arch" {
+		// The vendor scripts transact against pacman's current database. This
+		// step can be re-entered after a publish, so discard partial downloads
+		// and refresh before handing control to them.
+		if err := e.sudoSh(`rm -f /var/cache/pacman/pkg/*.part`); err != nil {
+			e.say(i18n.T("warning: could not clear partial downloads (continuing)"))
+		}
+		if err := e.sudo("pacman", "-Syu", "--noconfirm"); err != nil {
+			e.say(i18n.T("warning: could not refresh the package db before the driver install; a stale mirror may still fail a download (continuing)"))
+		}
 	}
 	// a single vendor script failing must NOT sink the whole desktop install,
 	// matching installation/backend/lib/drivers.sh: the box still boots on the
@@ -1110,27 +2208,204 @@ func stepDrivers(e *engine) error {
 	return nil
 }
 
-func stepSession(e *engine) error {
+// releaseQylockGuards stops leftover qylock cutover units, waiter first so it
+// cannot take a guard back. an absent unit is fine.
+const releaseQylockGuards = `for u in ryoku-qylock-cutover-wait ryoku-qylock-generation-guard ryoku-qylock-launch-guard; do
+  systemctl --user stop "$u.service" 2>/dev/null || :
+done
+rm -f "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"/ryoku-qylock-*.ready`
+
+const releaseQylockGuardsRunit = `for u in ryoku-qylock-cutover-wait ryoku-qylock-generation-guard ryoku-qylock-launch-guard; do
+  [ -d "$HOME/.config/service/$u" ] && sv down "$HOME/.config/service/$u" >/dev/null 2>&1 || :
+done
+rm -f "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"/ryoku-qylock-*.ready`
+
+func enableRunitService(e *engine, service string, optional bool) error {
+	source := filepath.Join("/etc/sv", service)
+	if !e.dry {
+		if fi, err := os.Stat(source); err != nil || !fi.IsDir() {
+			if optional {
+				return nil
+			}
+			return fmt.Errorf("runit service %s is missing", source)
+		}
+	}
+	return e.sudo("ln", "-sfn", source, filepath.Join("/etc/runit/runsvdir/default", service))
+}
+
+func disableRunitService(e *engine, service string) {
+	link := filepath.Join("/etc/runit/runsvdir/default", service)
+	enabled := e.dry
+	if !e.dry {
+		_, err := os.Lstat(link)
+		enabled = err == nil
+	}
+	if err := e.sudo("rm", "-f", link); err != nil {
+		e.say(i18n.Tf("warning: could not disable %s", service))
+		return
+	}
+	if enabled {
+		if err := e.sudo("sv", "down", filepath.Join("/etc/sv", service)); err != nil {
+			e.say(i18n.Tf("warning: could not stop %s; it is disabled for the next boot", service))
+		}
+	}
+}
+
+func wireRunitServices(e *engine) error {
+	if err := e.sudo("mkdir", "-p", "/etc/runit/runsvdir/default"); err != nil {
+		return err
+	}
+	// elogind stays D-Bus activated, Void's default: the sddm service activates
+	// login1 itself before the greeter starts, so a supervised copy would lose
+	// the bus name to it and restart every second for the whole uptime.
+	services := []string{"socklog-unix", "nanoklogd", "dbus", "polkitd", "turnstiled", "bluetoothd"}
 	if e.p.switchDM {
-		if dm := e.f.otherDM(); dm != "" {
-			// disable, never mask or uninstall: reversible, and the running
-			// greeter session is untouched until reboot.
-			if err := e.svcDisable(dm); err != nil {
-				return err
+		services = append(services, "sddm")
+	}
+	if e.p.switchNet {
+		services = append(services, "NetworkManager")
+	}
+	for _, service := range services {
+		if err := enableRunitService(e, service, false); err != nil {
+			return err
+		}
+	}
+	return enableRunitService(e, "power-profiles-daemon", true)
+}
+
+func ensureRunitSession(e *engine) error {
+	host := e.ryokuTool("ryoku-host")
+	if host == "" {
+		host = "ryoku-host"
+	}
+	if err := e.sudo(host, "session", "ensure", "--system"); err != nil {
+		return err
+	}
+	if err := e.cmd("", nil, host, "session", "ensure", "--user"); err != nil {
+		return err
+	}
+	return fixRunitSessionWrappers(e)
+}
+
+func ensureFedoraGroups(e *engine) error {
+	candidates := []string{"wheel", "video", "input"}
+	if e.dry {
+		return e.sudo("usermod", "-aG", strings.Join(candidates, ","), e.f.username)
+	}
+	current := map[string]bool{}
+	for _, group := range strings.Fields(out("id", "-nG", e.f.username)) {
+		current[group] = true
+	}
+	var add []string
+	for _, group := range candidates {
+		if current[group] || exec.Command("getent", "group", group).Run() != nil {
+			continue
+		}
+		add = append(add, group)
+	}
+	if len(add) == 0 {
+		return nil
+	}
+	if err := e.sudo("usermod", "-aG", strings.Join(add, ","), e.f.username); err != nil {
+		return err
+	}
+	for _, group := range add {
+		e.recordRestore("sudo gpasswd -d " + e.f.username + " " + group + " || true")
+	}
+	return nil
+}
+
+func enableFedoraPowerProfiles(e *engine, unitDirs ...string) error {
+	if len(unitDirs) == 0 {
+		unitDirs = []string{"/usr/lib/systemd/system", "/lib/systemd/system"}
+	}
+	for _, dir := range unitDirs {
+		if _, err := os.Stat(filepath.Join(dir, "power-profiles-daemon.service")); err == nil {
+			return e.sudo("systemctl", "enable", "power-profiles-daemon.service")
+		}
+	}
+	return nil
+}
+
+func enableFedoraBluetooth(e *engine, unitDirs ...string) error {
+	if len(unitDirs) == 0 {
+		unitDirs = []string{"/usr/lib/systemd/system", "/lib/systemd/system"}
+	}
+	for _, dir := range unitDirs {
+		if _, err := os.Stat(filepath.Join(dir, "bluetooth.service")); err != nil {
+			continue
+		}
+		if unitEnabled("system", "bluetooth.service") {
+			return nil
+		}
+		if err := e.sudo("systemctl", "enable", "bluetooth.service"); err != nil {
+			return err
+		}
+		e.recordRestore("sudo systemctl disable bluetooth.service")
+		return nil
+	}
+	return nil
+}
+
+func stepSession(e *engine) error {
+	if e.usesRunit() {
+		if err := wireRunitServices(e); err != nil {
+			return err
+		}
+		if err := ensureRunitSession(e); err != nil {
+			return err
+		}
+	}
+	if e.d().id == "fedora" {
+		if err := ensureFedoraGroups(e); err != nil {
+			return err
+		}
+		if err := enableFedoraPowerProfiles(e); err != nil {
+			return err
+		}
+		if err := enableFedoraBluetooth(e); err != nil {
+			return err
+		}
+	}
+	if e.p.switchDM {
+		if e.usesRunit() {
+			if dm := e.f.otherDM(); dm != "" {
+				disableRunitService(e, runitServiceName(dm))
+				e.recordRestore("sudo ln -s /etc/sv/" + runitServiceName(dm) + " /etc/runit/runsvdir/default/" + runitServiceName(dm))
 			}
-			e.recordRestore(svcDisableLine("sddm.service") + " && " + svcEnableLine(dm))
-		} else if e.f.currentDM == "" {
-			undo := svcDisableLine("sddm.service")
-			if initSystem() != "runit" {
-				undo += " && sudo systemctl set-default multi-user.target"
+		} else {
+			if dm := e.f.otherDM(); dm != "" {
+				// disable, never mask or uninstall: reversible, and the running
+				// greeter session is untouched until reboot.
+				if err := e.sudo("systemctl", "disable", dm); err != nil {
+					return err
+				}
+				e.recordRestore("sudo systemctl disable sddm.service && sudo systemctl enable " + dm)
+			} else if e.f.currentDM == "" {
+				e.recordRestore("sudo systemctl disable sddm.service && sudo systemctl set-default multi-user.target")
 			}
-			e.recordRestore(undo)
 		}
 		if err := e.cmd("", nil, "bash", filepath.Join(e.payload, "ryoku/lockscreen/sddm/setup")); err != nil {
 			return err
 		}
+		if err := e.configureSDDMLastSession(); err != nil {
+			return err
+		}
 	} else {
 		e.say(i18n.T("keeping your current display manager; select the Hyprland session at login"))
+	}
+
+	// an older ryoku-desktop pacman hook also cut over the session this install
+	// runs from, and a cutover that failed there leaves qylock guard units
+	// holding the locks install-qylock takes: this step then waits on them
+	// with no output. nothing here needs them: the installer replaces the lock
+	// generation outright and the new session starts after a reboot.
+	releaseGuards := releaseQylockGuards
+	if e.usesRunit() {
+		releaseGuards = releaseQylockGuardsRunit
+	}
+	if err := e.cmd("", nil, "sh", "-c", releaseGuards); err != nil {
+		return err
 	}
 
 	// qylock bundle lives at the same system path the ISO uses, then its own
@@ -1151,18 +2426,19 @@ func stepSession(e *engine) error {
 		return err
 	}
 
-	// greeter policy: install-qylock wrote 99-ryoku.conf and sddm/setup wrote
-	// 10-ryoku-wayland.conf (DisplayServer=wayland). SDDM reads conf.d lexically
-	// and later files win per key, so KDE's kde_settings.conf outranks the theme.
-	// The greeter toggle decides who ends up on top; opting out drops both Ryoku
-	// files so the user's greeter theme AND display server stand.
+	// SDDM loads vendor drop-ins first, administrator drop-ins next, and
+	// /etc/sddm.conf last. A managed main-file block is needed only when that
+	// last file has an active theme assignment that would beat Ryoku's drop-in.
+	if err := e.configureSDDMMainTheme(e.p.greeter); err != nil {
+		return err
+	}
 	switch {
 	case !e.p.greeter:
 		if err := e.sudo("rm", "-f", "/etc/sddm.conf.d/99-ryoku.conf", "/etc/sddm.conf.d/zz-ryoku.conf", "/etc/sddm.conf.d/10-ryoku-wayland.conf"); err != nil {
 			return err
 		}
 		e.say(i18n.T("kept your current SDDM greeter (Ryoku's theme and Wayland greeter are installed, not selected)"))
-	case e.f.kdeSddmConf:
+	case e.f.kdeSddmAdminConf:
 		zz := "# written by ryoku-shell-install: sorts after kde_settings.conf so the\n" +
 			"# ryoku greeter theme wins. delete this file to get the KDE greeter back.\n" +
 			"[Theme]\nCurrent=ryoku\n"
@@ -1195,18 +2471,27 @@ fi`); err != nil {
 	}
 
 	if e.p.switchNet {
-		for _, n := range e.f.otherNet {
-			if err := e.svcDisable(n); err != nil {
-				e.say(i18n.Tf("warning: could not disable %s", n))
-				continue
+		if e.usesRunit() {
+			for _, service := range []string{"dhcpcd", "wpa_supplicant"} {
+				disableRunitService(e, service)
 			}
-			e.recordRestore(svcEnableLine(n))
-		}
-		if !e.f.nmEnabled {
-			if err := e.svcEnable("NetworkManager.service"); err != nil {
-				return err
+			for _, service := range e.f.otherNet {
+				e.recordRestore("sudo ln -s /etc/sv/" + service + " /etc/runit/runsvdir/default/" + service)
 			}
-			e.recordRestore(svcDisableLine("NetworkManager.service"))
+		} else {
+			for _, n := range e.f.otherNet {
+				if err := e.sudo("systemctl", "disable", n); err != nil {
+					e.say(i18n.Tf("warning: could not disable %s", n))
+					continue
+				}
+				e.recordRestore("sudo systemctl enable " + n)
+			}
+			if !e.f.nmEnabled {
+				if err := e.sudo("systemctl", "enable", "NetworkManager.service"); err != nil {
+					return err
+				}
+				e.recordRestore("sudo systemctl disable NetworkManager.service")
+			}
 		}
 		// iwd backend pin, Ryoku network policy. takes effect at the next NM
 		// restart (reboot), so the live wifi connection is never dropped.
@@ -1222,6 +2507,126 @@ EOF`); err != nil {
 	return nil
 }
 
+// seededKeymap is the layout the installer carries into the store: an explicit
+// AZERTY choice first, else what detection salvaged. Empty when there is
+// nothing to carry (no layout, or plain us).
+func seededKeymap(e *engine) (layout, variant, options, source string, explicit bool) {
+	layout, variant, options, source = e.f.kbLayout, e.f.kbVariant, e.f.kbOptions, e.f.kbSource
+	explicit = e.p != nil && (e.p.azertyFR || e.p.azertyBE)
+	if explicit {
+		layout, variant, options, source = "fr", "", "", "plan"
+		if e.p.azertyBE {
+			layout = "be"
+		}
+	}
+	if layout == "" || (layout == "us" && variant == "" && options == "") {
+		return "", "", "", "", false
+	}
+	if source == "" {
+		source = "localectl"
+	}
+	return layout, variant, options, source, explicit
+}
+
+// seedDesktopKeymap writes the carried layout into the neutral store and
+// reports whether it did; a store that already holds a deliberate pick is
+// left alone unless the plan carries an explicit choice.
+func seedDesktopKeymap(e *engine) (bool, error) {
+	layout, variant, options, source, explicit := seededKeymap(e)
+	if layout == "" {
+		return false, nil
+	}
+
+	store := filepath.Join(e.f.homeDir, ".config/ryoku/desktop.json")
+	root := map[string]any{}
+	data, err := os.ReadFile(store)
+	switch {
+	case err == nil && strings.TrimSpace(string(data)) != "":
+		if err := json.Unmarshal(data, &root); err != nil {
+			return false, fmt.Errorf("read keyboard settings from %s: %w", store, err)
+		}
+	case err != nil && !os.IsNotExist(err):
+		return false, fmt.Errorf("read keyboard settings from %s: %w", store, err)
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	desktopNode, ok := root["desktop"].(map[string]any)
+	if !ok {
+		if _, exists := root["desktop"]; exists {
+			return false, fmt.Errorf("%s: desktop must be an object", store)
+		}
+		desktopNode = map[string]any{}
+		root["desktop"] = desktopNode
+	}
+	input, ok := desktopNode["input"].(map[string]any)
+	if !ok {
+		if _, exists := desktopNode["input"]; exists {
+			return false, fmt.Errorf("%s: desktop.input must be an object", store)
+		}
+		input = map[string]any{}
+		desktopNode["input"] = input
+	}
+	if current, exists := input["kbLayout"]; exists && !explicit {
+		currentLayout, stringValue := current.(string)
+		if !stringValue || (currentLayout != "" && currentLayout != "us") {
+			return false, nil
+		}
+	}
+	if e.dry {
+		e.sayf(i18n.T("DRYRUN: seed keyboard layout %q variant %q options %q from %s into %s"),
+			layout, variant, options, source, store)
+		return true, nil
+	}
+
+	input["kbLayout"] = layout
+	input["kbVariant"] = variant
+	input["kbOptions"] = options
+	data, err = json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	if err := os.MkdirAll(filepath.Dir(store), 0o755); err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(store, append(data, '\n'), 0o644); err != nil {
+		return false, err
+	}
+	e.sayf(i18n.T("seeded keyboard layout %q variant %q options %q from %s into %s"),
+		layout, variant, options, source, store)
+	return true, nil
+}
+
+var x11KeymapFieldRe = regexp.MustCompile(`(?m)^\s*X11 (Layout|Variant|Options):\s*(\S+)`)
+
+// applySystemKeymap puts the carried layout on the console and the login
+// screen now, with the sudo the installer already holds. Left to the doctor,
+// the same change goes through polkit, which prompts for a password in the
+// middle of an unattended run and hangs it where no agent can answer.
+func applySystemKeymap(e *engine, layout, variant, options string) error {
+	if !has("localectl") {
+		return nil
+	}
+	previous := map[string]string{}
+	for _, m := range x11KeymapFieldRe.FindAllStringSubmatch(out("localectl", "status"), -1) {
+		if m[2] != "(unset)" && m[2] != "n/a" {
+			previous[m[1]] = m[2]
+		}
+	}
+	if err := e.sudo("localectl", "set-x11-keymap", layout, "", variant, options); err != nil {
+		return err
+	}
+	// Positional arguments, so the empty model slot has to be quoted or the
+	// variant would be read as the model.
+	restore := "us"
+	if previous["Layout"] != "" {
+		restore = fmt.Sprintf("%q '' %q %q", previous["Layout"], previous["Variant"], previous["Options"])
+	}
+	e.recordRestore("sudo localectl set-x11-keymap " + restore)
+	e.say(i18n.Tf("set the console and login screen keymap to %s", layout))
+	return nil
+}
+
 func stepConfigs(e *engine) error {
 	ryoku := e.ryokuBin()
 	if !e.dry && ryoku == "" {
@@ -1230,17 +2635,27 @@ func stepConfigs(e *engine) error {
 	if ryoku == "" {
 		ryoku = "ryoku"
 	}
-	if err := e.cmd("", nil, ryoku, "materialize"); err != nil {
+	layout, variant, options, _, _ := seededKeymap(e)
+	seeded, err := seedDesktopKeymap(e)
+	if err != nil {
 		return err
 	}
+	if seeded {
+		if err := applySystemKeymap(e, layout, variant, options); err != nil {
+			return err
+		}
+	}
+	// a source build has no packaged base tree for materialize to apply;
+	// deploy.sh in the build step already laid and overlaid the config.
+	if !e.d().fromSource {
+		if err := e.cmd("", nil, ryoku, "materialize"); err != nil {
+			return err
+		}
+	}
 
-	// salvaged monitor pins go in before the stub pass, real pins beat a
-	// comment stub. only the hyprland dialect supports desc: names.
-	//
-	// The file and the dialect both follow the compositor being installed: the
-	// seam names the hand-pin file, and its extension picks the emitter. A
-	// hardcoded Lua path would drop a file niri never reads, and the salvaged
-	// layout would vanish with no error.
+	// Salvaged monitor pins go in before the stub pass, so real pins beat a
+	// comment stub. The provider seam names the hand-pin file, and its extension
+	// selects the emitter.
 	if rel := monitorPinFile(e.p.compositor); e.p.monPins && len(e.f.monOutputs) > 0 && rel != "" {
 		render := renderPins
 		if filepath.Ext(rel) == ".kdl" {
@@ -1264,68 +2679,6 @@ func stepConfigs(e *engine) error {
 				}
 				e.sayf(i18n.T("carried the %s monitor layout into %s"), e.f.monSource, rel)
 			}
-		}
-	}
-
-	// an explicit AZERTY choice in the plan beats any salvaged layout.
-	azerty := e.p.azertyFR || e.p.azertyBE
-	if azerty {
-		layout := "fr"
-		if e.p.azertyBE {
-			layout = "be"
-		}
-		e.f.kbLayout, e.f.kbVariant, e.f.kbOptions, e.f.kbSource = layout, "", "", "plan"
-	}
-
-	// keyboard.lua is user-owned: seeded once, never touched by updates.
-	lua := func(s string) string { return strings.NewReplacer(`"`, ``, `\`, ``).Replace(s) }
-	if e.f.kbLayout != "" && (e.f.kbLayout != "us" || e.f.kbVariant != "" || e.f.kbOptions != "") {
-		src := e.f.kbSource
-		if src == "" {
-			src = "localectl"
-		}
-		kb := filepath.Join(e.f.homeDir, ".config/hypr/keyboard.lua")
-		// a salvaged layout never clobbers an existing file (a repair run
-		// keeps hand edits); an explicit AZERTY choice always writes.
-		if _, err := os.Lstat(kb); err == nil && !azerty {
-			e.say(i18n.T("hypr/keyboard.lua already exists, keeping it"))
-		} else {
-			e.sayf(i18n.T("seeding keyboard layout %q variant %q options %q (from %s) into hypr/keyboard.lua"),
-				e.f.kbLayout, e.f.kbVariant, e.f.kbOptions, src)
-			if !e.dry {
-				content := "-- keyboard layout, carried over by the installer. edits here stick.\n" +
-					"hl.config({\n    input = {\n        kb_layout = \"" + lua(e.f.kbLayout) + "\",\n" +
-					"        kb_variant = \"" + lua(e.f.kbVariant) + "\",\n" +
-					"        kb_options = \"" + lua(e.f.kbOptions) + "\",\n    },\n})\n"
-				if err := os.WriteFile(kb, []byte(content), 0o644); err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	// console + login-screen parity for an explicit AZERTY choice: the vt
-	// keymap and SDDM's X11 greeter follow the desktop layout.
-	if azerty {
-		layout, keymap := "fr", "fr"
-		if e.p.azertyBE {
-			layout, keymap = "be", "be-latin1"
-		}
-		e.say(i18n.Tf("setting the console keymap to %s in /etc/vconsole.conf", keymap))
-		if err := e.sudoSh(`install -Dm644 /dev/stdin /etc/vconsole.conf <<'EOF'
-KEYMAP=` + keymap + `
-EOF`); err != nil {
-			return err
-		}
-		e.say(i18n.Tf("pointing the SDDM login screen at the %s layout via xorg.conf.d", layout))
-		if err := e.sudoSh(`install -Dm644 /dev/stdin /etc/X11/xorg.conf.d/00-keyboard.conf <<'EOF'
-Section "InputClass"
-        Identifier "system-keyboard"
-        MatchIsKeyboard "on"
-        Option "XkbLayout" "` + layout + `"
-EndSection
-EOF`); err != nil {
-			return err
 		}
 	}
 
@@ -1373,10 +2726,10 @@ EOF`); err != nil {
 		{"ryoku/assets/wallpapers", "Pictures/Wallpapers", true, true},
 		{"ryoku/apps/npm/npmrc", ".npmrc", false, true},
 		{"ryoku/apps/nvim/ryoku-nvim.desktop", ".local/share/applications/ryoku-nvim.desktop", false, false},
-		// no mimeapps.list seed: the default-app map belongs to the vendor layer
-		// (/usr/share/applications/mimeapps.list, laid by ryoku-desktop or by
-		// deploy.sh), never to ~/.config/mimeapps.list, which is where the user's
-		// own "Set as default" picks live.
+		// no mimeapps.list seed: the default-app map belongs to the site layer
+		// (/usr/local/share/applications/mimeapps.list, laid by ryoku-desktop or
+		// by deploy.sh), never to ~/.config/mimeapps.list, which is where the
+		// user's own "Set as default" picks live.
 	}
 	for _, s := range seeds {
 		src := filepath.Join(e.payload, s.src)
@@ -1390,10 +2743,33 @@ EOF`); err != nil {
 		}
 		e.say(i18n.Tf("seeded ~/%s", s.dst))
 	}
-	return e.userDaemonReload()
+	if e.usesRunit() {
+		return nil
+	}
+	return e.cmd("", nil, "systemctl", "--user", "daemon-reload")
+}
+
+func selectedAURPackages(p *plan) []string {
+	var pkgs []string
+	for _, pkg := range aurPkgs {
+		if pkg == "localsend-bin" && !p.componentOn("localsend") {
+			continue
+		}
+		if pkg == "voxtype-bin" && !p.componentOn("voxtype") {
+			continue
+		}
+		pkgs = append(pkgs, pkg)
+	}
+	if p.browser == "zen" {
+		pkgs = append(pkgs, browserPackage["zen"])
+	}
+	return pkgs
 }
 
 func stepAUR(e *engine) error {
+	if e.p.browser == "zen" {
+		e.p.aur = true
+	}
 	if !e.p.aur {
 		e.say(i18n.T("AUR extras skipped by choice; the wallpaper daemon is a package depend and is unaffected"))
 		return nil
@@ -1401,31 +2777,37 @@ func stepAUR(e *engine) error {
 	helper := e.f.aurHelper
 	if helper == "" {
 		e.say(i18n.T("no AUR helper found, bootstrapping yay-bin"))
-		tmp, err := os.MkdirTemp("", "ryoku-yay-")
-		if err != nil {
-			return err
+		if e.dry {
+			e.say(i18n.T("DRYRUN: build and install yay-bin"))
+			helper = "yay"
+		} else {
+			tmp, err := os.MkdirTemp("", "ryoku-yay-")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(tmp)
+			if err := e.cmd(tmp, nil, "git", "clone", "https://aur.archlinux.org/yay-bin.git"); err != nil {
+				return err
+			}
+			// build and install separately: makepkg -i runs a plain interactive
+			// sudo, which on a lapsed credential prompts on /dev/tty over the TUI
+			// and hangs there; the engine's sudo -n fails loudly instead.
+			if err := e.cmd(filepath.Join(tmp, "yay-bin"), nil, "makepkg", "--noconfirm"); err != nil {
+				return err
+			}
+			built, _ := filepath.Glob(filepath.Join(tmp, "yay-bin", "*.pkg.tar.zst"))
+			if len(built) == 0 {
+				return errors.New(i18n.T("yay-bin build produced no package"))
+			}
+			if err := e.sudo(append([]string{"pacman", "-U", "--noconfirm"}, built...)...); err != nil {
+				return err
+			}
+			helper = "yay"
 		}
-		defer os.RemoveAll(tmp)
-		if err := e.cmd(tmp, nil, "git", "clone", "https://aur.archlinux.org/yay-bin.git"); err != nil {
-			return err
-		}
-		// build and install separately: makepkg -i runs a plain interactive
-		// sudo, which on a lapsed credential prompts on /dev/tty over the TUI
-		// and hangs there; the engine's sudo -n fails loudly instead.
-		if err := e.cmd(filepath.Join(tmp, "yay-bin"), nil, "makepkg", "--noconfirm"); err != nil {
-			return err
-		}
-		built, _ := filepath.Glob(filepath.Join(tmp, "yay-bin", "*.pkg.tar.zst"))
-		if len(built) == 0 {
-			return errors.New(i18n.T("yay-bin build produced no package"))
-		}
-		if err := e.sudo(append([]string{"pacman", "-U", "--noconfirm"}, built...)...); err != nil {
-			return err
-		}
-		helper = "yay"
 	}
+	pkgs := selectedAURPackages(e.p)
 	var failed []string
-	for _, p := range aurPkgs {
+	for _, p := range pkgs {
 		// --sudoflags=-n, same reason: the helper's own sudo must fail into
 		// the log, never prompt over the TUI. yay and paru both take it.
 		if err := e.cmd("", nil, helper, "-S", "--needed", "--noconfirm", "--sudoflags=-n", p); err != nil {
@@ -1440,15 +2822,310 @@ func stepAUR(e *engine) error {
 	return nil
 }
 
-func stepFish(e *engine) error {
-	if !e.p.fish {
-		e.say(i18n.T("keeping your current login shell"))
+func (e *engine) packageInstalled(pkg string) bool {
+	if e.installedPkg != nil {
+		return e.installedPkg(pkg)
+	}
+	local := e.d().local(pkg)
+	return local != "" && e.d().installedPkg(local)
+}
+
+func (e *engine) writeProvisionedLedger() error {
+	path := filepath.Join(e.f.homeDir, ".local/state/ryoku/provisioned")
+	var existingData []byte
+	if !e.dry {
+		existingData, _ = os.ReadFile(path)
+	}
+	existing := map[string]bool{}
+	for _, pkg := range strings.Fields(string(existingData)) {
+		existing[pkg] = true
+	}
+	var add []string
+	for _, pkg := range choiceDropPackages(e.p) {
+		if existing[pkg] || e.packageInstalled(pkg) {
+			continue
+		}
+		existing[pkg] = true
+		add = append(add, pkg)
+		if e.dry {
+			e.say(i18n.Tf("DRYRUN: append %s to %s", pkg, path))
+		}
+	}
+	if e.dry || len(add) == 0 {
 		return nil
 	}
-	if err := e.sudo("usermod", "-s", "/usr/bin/fish", e.f.username); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	e.recordRestore("sudo usermod -s " + e.f.userShell + " " + e.f.username)
+	var lines []string
+	for _, pkg := range strings.Fields(string(existingData)) {
+		lines = append(lines, pkg)
+	}
+	lines = append(lines, add...)
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
+func browserDesktopKeys(browser string) []string {
+	switch browser {
+	case "zen":
+		return []string{"zen.desktop", "zen-browser.desktop", "app.zen_browser.zen.desktop"}
+	case "chromium":
+		return []string{"chromium.desktop"}
+	default:
+		return []string{"firefox.desktop"}
+	}
+}
+
+func browserRoleCommand(browser string) string {
+	if browser == "zen" {
+		return "zen"
+	}
+	return browser
+}
+
+func (e *engine) setDefaultBrowser() error {
+	store := filepath.Join(e.f.homeDir, ".config/ryoku/desktop.json")
+	// "none" is the user declining a browser, not one that failed to land.
+	// Returning here keeps the log honest and leaves desktop.apps.browser unset,
+	// which browserRoleCommand would otherwise fill with the literal "none".
+	if e.p.browser == "none" {
+		e.say(i18n.T("no browser chosen; leaving the browser defaults and the desktop role unset"))
+		return nil
+	}
+	if e.dry {
+		e.say(i18n.Tf("DRYRUN: set %s as the default browser for http, https and html", e.p.browser))
+		e.say(i18n.Tf("DRYRUN: write desktop.apps.browser=%s to %s", browserRoleCommand(e.p.browser), store))
+		return nil
+	}
+	desktop := ""
+	for _, key := range browserDesktopKeys(e.p.browser) {
+		if _, err := os.Stat(filepath.Join("/usr/share/applications", key)); err == nil {
+			desktop = key
+			break
+		}
+	}
+	if desktop == "" {
+		e.say(i18n.Tf("chosen browser %s is not installed; leaving browser defaults unchanged", e.p.browser))
+		return nil
+	}
+	if err := e.cmd("", nil, "xdg-mime", "default", desktop,
+		"x-scheme-handler/http", "x-scheme-handler/https", "text/html"); err != nil {
+		e.say(i18n.Tf("warning: could not set %s as the default browser (continuing)", e.p.browser))
+	}
+
+	if err := writeDesktopAppRole(store, "browser", browserRoleCommand(e.p.browser)); err != nil {
+		e.say(i18n.Tf("warning: could not update browser role in %s: %s", store, err))
+	}
+	return nil
+}
+
+func writeDesktopAppRole(store, role, value string) error {
+	root := map[string]any{}
+	if data, err := os.ReadFile(store); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+		if err := json.Unmarshal(data, &root); err != nil {
+			return fmt.Errorf("invalid JSON: %w", err)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	desktopNode, ok := root["desktop"].(map[string]any)
+	if !ok {
+		desktopNode = map[string]any{}
+		root["desktop"] = desktopNode
+	}
+	apps, ok := desktopNode["apps"].(map[string]any)
+	if !ok {
+		apps = map[string]any{}
+		desktopNode["apps"] = apps
+	}
+	apps[role] = value
+	data, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(store), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(store, append(data, '\n'), 0o644)
+}
+
+func (e *engine) setDefaultFileManager() error {
+	desktop := fileManagerDesktop[e.p.fileManager]
+	store := filepath.Join(e.f.homeDir, ".config/ryoku/desktop.json")
+	if desktop == "" {
+		return fmt.Errorf(i18n.T("unknown file manager %q"), e.p.fileManager)
+	}
+	if e.dry {
+		e.say(i18n.Tf("DRYRUN: xdg-mime default %s inode/directory", desktop))
+		e.say(i18n.Tf("DRYRUN: write desktop.apps.files=%s to %s", e.p.fileManager, store))
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join("/usr/share/applications", desktop)); err != nil {
+		e.say(i18n.Tf("chosen file manager %s is not installed; leaving directory defaults unchanged", e.p.fileManager))
+		return nil
+	}
+	if err := e.cmd("", nil, "xdg-mime", "default", desktop, "inode/directory"); err != nil {
+		e.say(i18n.Tf("warning: could not set %s as the default file manager (continuing)", e.p.fileManager))
+	}
+	if err := writeDesktopAppRole(store, "files", e.p.fileManager); err != nil {
+		e.say(i18n.Tf("warning: could not update file manager role in %s: %s", store, err))
+	}
+	return nil
+}
+
+const ryokuHiddenDesktopEntry = "[Desktop Entry]\nHidden=true\n"
+
+func (e *engine) reconcileHiddenDesktopEntries() error {
+	hidden := map[string]bool{}
+	for _, id := range e.p.choiceEdition().HiddenDesktopIDs(e.p.componentSelections()) {
+		hidden[id] = true
+	}
+	dir := filepath.Join(e.f.homeDir, ".local/share/applications")
+	for _, availability := range e.p.choiceEdition().Components() {
+		if !availability.Available {
+			continue
+		}
+		for _, id := range availability.Component.DesktopIDs {
+			path := filepath.Join(dir, id)
+			if e.dry {
+				if hidden[id] {
+					e.say(i18n.Tf("DRYRUN: write hidden desktop entry %s", path))
+				} else {
+					e.say(i18n.Tf("DRYRUN: remove %s only if it is Ryoku's hide file", path))
+				}
+				continue
+			}
+			data, err := os.ReadFile(path)
+			if hidden[id] {
+				switch {
+				case os.IsNotExist(err):
+					if err := os.MkdirAll(dir, 0o755); err != nil {
+						return err
+					}
+					if err := os.WriteFile(path, []byte(ryokuHiddenDesktopEntry), 0o644); err != nil {
+						return err
+					}
+				case err != nil:
+					return err
+				case string(data) != ryokuHiddenDesktopEntry:
+					e.say(i18n.Tf("kept the existing user desktop override %s", path))
+				}
+				continue
+			}
+			if err == nil && string(data) == ryokuHiddenDesktopEntry {
+				if err := os.Remove(path); err != nil {
+					return err
+				}
+			} else if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (e *engine) syncRashinMarker() error {
+	path := filepath.Join(e.f.homeDir, ".local/state/ryoku/rashin-setup-pending")
+	want := e.p.componentOn("rashin") && !hermesInstalled(e.f.homeDir)
+	if e.dry {
+		action := i18n.T("remove")
+		if want {
+			action = i18n.T("write")
+		}
+		e.say(i18n.Tf("DRYRUN: %s %s", action, path))
+		return nil
+	}
+	if !want {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, nil, 0o644)
+}
+
+// hermesInstalled mirrors Rashin's FindHermes: an existing box that already
+// has the agent gets no first-login setup window.
+func hermesInstalled(home string) bool {
+	if _, err := exec.LookPath("hermes"); err == nil {
+		return true
+	}
+	for _, candidate := range []string{
+		filepath.Join(home, ".hermes", "bin", "hermes"),
+		filepath.Join(home, ".local", "bin", "hermes"),
+	} {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *engine) writeDefaultRiceMarker() error {
+	if !e.freshAccount {
+		return nil
+	}
+	path := filepath.Join(e.f.homeDir, ".local/state/ryoku/default-rice-pending")
+	if e.dry {
+		e.say(i18n.Tf("DRYRUN: write default to %s", path))
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte("default\n"), 0o644)
+}
+
+func stepPreferences(e *engine) error {
+	if err := e.writeProvisionedLedger(); err != nil {
+		return err
+	}
+	if err := e.reconcileHiddenDesktopEntries(); err != nil {
+		return err
+	}
+	if err := e.setDefaultBrowser(); err != nil {
+		return err
+	}
+	if err := e.setDefaultFileManager(); err != nil {
+		return err
+	}
+	if err := e.syncRashinMarker(); err != nil {
+		return err
+	}
+	return e.writeDefaultRiceMarker()
+}
+
+func stepLoginShell(e *engine) error {
+	if err := stepPreferences(e); err != nil {
+		return err
+	}
+	// bash and zsh only read Ryoku's config through a loader line in the rc
+	// file (fish's config is laid directly); without it a kept or chosen bash
+	// or zsh opens bare: no fastfetch, prompt or ~/.local/bin on PATH.
+	hub := e.ryokuTool("ryoku-hub")
+	if hub == "" {
+		hub = "ryoku-hub"
+	}
+	if err := e.cmd("", nil, hub, "shell", "loaders", e.p.shell); err != nil {
+		return err
+	}
+	path := loginShellPath[e.p.shell]
+	if filepath.Clean(e.f.userShell) == path {
+		e.say(i18n.Tf("%s is already your login shell", path))
+		return nil
+	}
+	if err := e.sudo("usermod", "-s", path, e.f.username); err != nil {
+		return err
+	}
+	if e.f.userShell != "" {
+		e.recordRestore("sudo usermod -s " + e.f.userShell + " " + e.f.username)
+	}
 	return nil
 }
 
@@ -1465,9 +3142,85 @@ func stepDoctor(e *engine) error {
 	return nil
 }
 
+func runRunitSessionCheck(host string) ([]string, error) {
+	out, err := exec.Command(host, "session", "check").CombinedOutput()
+	if err == nil {
+		return nil, nil
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
+		detail := strings.TrimSpace(string(out))
+		if detail == "" {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %s", err, detail)
+	}
+	var findings []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			findings = append(findings, line)
+		}
+	}
+	if len(findings) == 0 {
+		return nil, errors.New(i18n.T("session check reported a problem without details"))
+	}
+	return findings, nil
+}
+
+func voidRepoIsConfigured(e *engine) bool {
+	_, want, _ := voidRepository(e.ref)
+	for _, path := range []string{voidRepoConfig, voidSystemRepo} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+			if ok && strings.TrimSpace(key) == "repository" {
+				return strings.TrimSpace(value) == want
+			}
+		}
+		if path == voidRepoConfig {
+			return false
+		}
+	}
+	return false
+}
+
+func voidKeysAreTrusted(e *engine) bool {
+	plists, err := voidKeyPlists(e)
+	if err != nil || len(plists) == 0 {
+		return false
+	}
+	for _, plist := range plists {
+		if _, err := os.Stat(filepath.Join(voidTrustedKeyDir, filepath.Base(plist))); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func fedoraRepoIsConfigured(e *engine) bool {
+	_, repository := fedoraRepository(e.ref)
+	data, err := os.ReadFile(fedoraRepoConfigPath())
+	return err == nil && string(data) == fedoraRepoContent(repository)
+}
+
+func fedoraKeyIsPresent() bool {
+	info, err := os.Stat(fedoraKeyPath)
+	return err == nil && info.Mode().IsRegular() && info.Size() > 0
+}
+
 func stepVerify(e *engine) error {
 	if e.dry {
-		e.say(i18n.T("DRYRUN: verify the installed desktop, session files and services"))
+		switch e.d().id {
+		case "void":
+			e.say(i18n.T("DRYRUN: verify Ryoku XBPS repo, trusted key, ryoku-desktop packages, Turnstile, niri session"))
+		case "fedora":
+			e.say(i18n.T("DRYRUN: verify the Ryoku RPM repo and key, RPM packages, SDDM, and compositor session"))
+		default:
+			e.say(i18n.T("DRYRUN: verify [ryoku] repo, packages, session files"))
+		}
 		return nil
 	}
 	var bad []string
@@ -1483,6 +3236,26 @@ func stepVerify(e *engine) error {
 		check(e.ryokuBin() != "", i18n.T("ryoku CLI built and installed"))
 		_, err := os.Stat(filepath.Join(e.f.homeDir, ".local/bin/ryoku-shell"))
 		check(err == nil, i18n.T("ryoku-shell daemon built"))
+	} else if e.d().id == "void" {
+		check(voidRepoIsConfigured(e), i18n.T("Ryoku XBPS repository configured"))
+		check(voidKeysAreTrusted(e), i18n.T("Ryoku XBPS signing key trusted"))
+		check(e.d().installedPkg("ryoku-keyring"), i18n.T("ryoku-keyring installed through XBPS"))
+		check(e.d().installedPkg("ryoku-desktop"), i18n.T("ryoku-desktop installed through XBPS"))
+		check(e.d().installedPkg("ryoku-desktop-niri"), i18n.T("ryoku-desktop-niri installed through XBPS"))
+		check(has("ryoku"), i18n.T("ryoku CLI on PATH"))
+		st, err := os.Stat("/usr/share/ryoku/config")
+		check(err == nil && st.IsDir(), i18n.T("base config tree at /usr/share/ryoku/config"))
+	} else if e.d().id == "fedora" {
+		check(fedoraRepoIsConfigured(e), i18n.T("Ryoku RPM repository configured"))
+		check(fedoraKeyIsPresent(), i18n.T("Ryoku RPM signing key installed"))
+		check(e.d().installedPkg("ryoku"), i18n.T("ryoku installed through RPM"))
+		check(e.d().installedPkg("ryoku-desktop"), i18n.T("ryoku-desktop installed through RPM"))
+		check(e.d().installedPkg("ryoku-desktop-"+e.p.compositor), i18n.Tf("ryoku-desktop-%s installed through RPM", e.p.compositor))
+		check(has("ryoku"), i18n.T("ryoku CLI on PATH"))
+		st, err := os.Stat("/usr/share/ryoku/config")
+		check(err == nil && st.IsDir(), i18n.T("base config tree at /usr/share/ryoku/config"))
+		theme, err := os.Stat("/usr/share/sddm/themes/ryoku")
+		check(err == nil && theme.IsDir(), i18n.T("Ryoku SDDM session assets installed"))
 	} else {
 		conf, _ := os.ReadFile("/etc/pacman.conf")
 		check(strings.Contains(string(conf), "[ryoku]"), i18n.T("[ryoku] repository in /etc/pacman.conf"))
@@ -1496,26 +3269,43 @@ func stepVerify(e *engine) error {
 	cdir := wm.ConfigDir(e.p.compositor)
 	_, err = os.Stat(filepath.Join(e.f.homeDir, ".config", cdir))
 	check(err == nil, i18n.Tf("%s config materialized in ~/.config/%s", e.p.compositor, cdir))
-	_, err = os.Stat(filepath.Join("/usr/share/wayland-sessions", e.p.compositor+".desktop"))
+	_, err = os.Stat(compositorWaylandSessionPath(e.p.compositor))
 	check(err == nil, i18n.Tf("%s wayland session registered", e.p.compositor))
 	// caps, not state: this runs before the new session is up, and caps answers
 	// without a live compositor (state would falsely fail here).
 	check(e.providerAnswers(), i18n.T("window-manager provider responds"))
 	if e.p.switchDM {
-		check(sysEnabled("sddm.service"), i18n.T("sddm login manager enabled"))
+		if e.usesRunit() {
+			check(runitServiceEnabled("sddm"), i18n.T("sddm runit service enabled"))
+		} else {
+			check(unitEnabled("system", "sddm.service"), i18n.T("sddm.service enabled"))
+		}
+	}
+	if e.usesRunit() {
+		host := e.ryokuTool("ryoku-host")
+		if host == "" {
+			host = "ryoku-host"
+		}
+		findings, sessionErr := runRunitSessionCheck(host)
+		switch {
+		case sessionErr != nil:
+			check(false, i18n.Tf("Turnstile and session bus check failed: %v", sessionErr))
+		case len(findings) == 0:
+			check(true, i18n.T("Turnstile and the session bus are set up"))
+		default:
+			for _, finding := range findings {
+				check(false, finding)
+			}
+		}
 	}
 	if e.p.switchDM && e.p.greeter {
 		if theme := effectiveSDDMTheme(); theme != "" && theme != "ryoku" {
-			e.say(gWarn + " " + i18n.Tf("an SDDM drop-in still selects greeter theme %s; check /etc/sddm.conf.d", theme))
+			e.say(gWarn + " " + i18n.Tf("SDDM still selects greeter theme %s; check /etc/sddm.conf and its drop-ins", theme))
 		}
 	}
-	if e.f.hasNvidia && e.f.secureBoot && !e.p.nvidia {
+	if e.d().id != "fedora" && e.f.hasNvidia && e.f.secureBoot && !e.p.nvidia {
 		e.say(gWarn + " " + i18n.T("Secure Boot is on, so the proprietary NVIDIA driver was skipped: unsigned DKMS modules are rejected at boot."))
 		e.say(i18n.T("To switch later, disable Secure Boot in firmware or sign the kernel and modules (sbctl), then re-run this installer."))
-	}
-	if e.f.hasNvidia && e.d().id == "void" {
-		e.say(gWarn + " " + i18n.T("the vendor driver scripts in this repo are Arch (pacman) only, so NVIDIA was not set up here."))
-		e.say(i18n.T("On Void it comes from the nonfree repository: enable void-repo-nonfree, then install the nvidia package."))
 	}
 	// matugen is a hard ryoku-desktop depend on Arch, so a miss means the desktop
 	// set install is broken. Debian does not package it: warn instead of failing.
@@ -1526,12 +3316,12 @@ func stepVerify(e *engine) error {
 	} else {
 		check(has("matugen"), i18n.T("matugen palette generator (colors follow the wallpaper)"))
 	}
-	if !has("ryogami") {
+	if e.ryokuTool("ryogami") == "" {
 		e.say(gWarn + " " + i18n.T("ryogami missing: the wallpaper will not paint until it installs (ryoku doctor retries it)"))
 	}
-	if e.p.devtools {
+	if e.p.devtools || e.d().fromSource {
 		check(has("go"), i18n.T("go toolchain on PATH (ryoku recovery rebuilds from source)"))
-	} else {
+	} else if e.d().id == "arch" {
 		e.say(gWarn + " " + i18n.T("developer toolchain skipped: ryoku recovery needs go; install with: sudo pacman -S go"))
 	}
 	if e.p.omarchy {

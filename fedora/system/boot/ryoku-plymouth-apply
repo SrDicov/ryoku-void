@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Ryoku's Plymouth splash on Fedora: make the shipped theme the default and
+# rebuild the dracut images that embed it. Fedora keeps its own GRUB
+# and kernels, so this is all of system/boot/ryoku-boot-apply that applies here.
+#
+#   apply   ryoku-desktop %posttrans. The first run makes ryoku the default; later
+#           runs rebuild only when the theme's files changed and ryoku is still
+#           the default, so a theme the user picked afterwards is kept.
+#   reset   ryoku-desktop %preun on removal: hand the splash back to Fedora's.
+set -uo pipefail
+
+theme_dir=/usr/share/plymouth/themes/ryoku
+stamp=/var/lib/ryoku/plymouth-theme.stamp
+
+[ "$(id -u)" -eq 0 ] || { echo "ryoku-plymouth-apply: must run as root" >&2; exit 0; }
+command -v plymouth-set-default-theme >/dev/null 2>&1 || exit 0
+
+# dracut copies the default theme into each image, so a change only reaches the
+# next boot once every installed kernel's image is rebuilt.
+rebuild() {
+  dracut --regenerate-all --force --quiet
+}
+
+fingerprint() {
+  find "$theme_dir" -type f -exec sha256sum {} + | sort | sha256sum | cut -d' ' -f1
+}
+
+# apply runs in the background on a live system (ryoku-desktop %posttrans), and
+# a second transaction finds it still running and starts none of its own, so
+# it rebuilds again whenever the theme changed under the rebuild just done.
+apply() {
+  [ -d "$theme_dir" ] || return 0
+  local fp current
+  fp=$(fingerprint)
+  current=$(plymouth-set-default-theme)
+  if [ -f "$stamp" ]; then
+    [ "$current" = ryoku ] || return 0
+    [ "$(cat "$stamp")" = "$fp" ] && return 0
+  else
+    plymouth-set-default-theme ryoku || return 0
+  fi
+  while :; do
+    rebuild || return 0
+    [ "$(fingerprint)" = "$fp" ] && break
+    fp=$(fingerprint)
+  done
+  mkdir -p "${stamp%/*}" && printf '%s\n' "$fp" >"$stamp"
+}
+
+reset() {
+  rm -f "$stamp"
+  [ "$(plymouth-set-default-theme)" = ryoku ] || return 0
+  plymouth-set-default-theme --reset && rebuild
+}
+
+case "${1:-}" in
+  apply) apply ;;
+  reset) reset ;;
+  *)
+    echo "usage: ryoku-plymouth-apply apply|reset" >&2
+    exit 2
+    ;;
+esac
+exit 0

@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+# SIGHUP reloads rules in-process, so live authentication agents stay registered.
+
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+	if systemctl is-active --quiet polkit.service; then
+		exec systemctl reload polkit.service
+	fi
+	exit 0
+fi
+
+if command -v sv >/dev/null 2>&1; then
+	if sv status polkitd >/dev/null 2>&1; then
+		exec sv hup polkitd
+	fi
+	exit 0
+fi
+
+command -v pgrep >/dev/null 2>&1 || exit 0
+pids=$(pgrep -x polkitd) || exit 0
+status=0
+for pid in $pids; do
+	kill -HUP "$pid" 2>/dev/null || status=1
+done
+exit "$status"

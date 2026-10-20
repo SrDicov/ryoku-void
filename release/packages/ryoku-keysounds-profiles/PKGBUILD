@@ -1,0 +1,41 @@
+# Maintainer: Ryoku <releases@ryoku.dev>
+#
+# ryoku-keysounds-profiles: the key-sound samples and the importer that makes
+# one from any pack, shared by both compositors' key sounds. The Hyprland plugin
+# (ryoku-keysounds) and niri's engine (ryoku-keysounds-niri) both depend on it,
+# so there is one copy of /usr/share/ryoku/keysounds and one
+# /usr/bin/ryoku-keysounds-import no matter which, or both, are installed.
+#
+# The profiles are real switch recordings cut from the MIT-licensed Mechvibes
+# packs (github.com/hainguyents13/mechvibes, src/audio), fetched here as a
+# pinned git source and sliced by ryoku-keysounds-import (see
+# ryoku/keysounds/profiles.txt for the pack behind each profile).
+pkgname=ryoku-keysounds-profiles
+pkgver=${RYOKU_PKGVER:-0.1.0}
+pkgrel=1
+pkgdesc="Key-sound sample profiles (real switch recordings) and the Mechvibes importer"
+arch=('x86_64')
+url="https://ryoku.dev"
+license=('GPL-3.0-or-later' 'MIT')
+# python runs the importer, ffmpeg cuts and normalises each sample, git fetches
+# the pinned Mechvibes tree.
+makedepends=('git' 'python' 'ffmpeg')
+source=("mechvibes::git+https://github.com/hainguyents13/mechvibes.git#commit=326252a13e7bef4f1c35d08ef0189b5af6f8ba02")
+sha256sums=('SKIP')
+
+_repo="$startdir/../../.."
+
+build() {
+  RYOKU_SRC="$_repo" \
+    RYOKU_PKGVER="$pkgver" \
+    MECHVIBES="$srcdir/mechvibes" \
+    RYOKU_BUILD_DIR="$srcdir" \
+    "$startdir/payload.sh" build
+}
+
+package() {
+  RYOKU_SRC="$_repo" \
+    RYOKU_PKGVER="$pkgver" \
+    RYOKU_BUILD_DIR="$srcdir" \
+    "$startdir/payload.sh" install "$pkgdir"
+}

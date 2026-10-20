@@ -1,10 +1,46 @@
 package main
 
 import (
+	"errors"
+	"net"
 	"regexp"
 	"strings"
 	"testing"
 )
+
+func TestRyokuDNSFiltered(t *testing.T) {
+	for _, address := range []string{
+		"10.10.34.35",
+		"172.16.0.1",
+		"192.168.1.1",
+		"127.0.0.1",
+		"::1",
+		"2001:4188:2:600:10:10:34:35",
+	} {
+		if !dnsAddressFiltered(net.ParseIP(address)) {
+			t.Errorf("%s was not classified as filtered DNS", address)
+		}
+	}
+	for _, address := range []string{"104.21.19.117", "172.67.186.34", "2606:4700:3032::6815:1375"} {
+		if dnsAddressFiltered(net.ParseIP(address)) {
+			t.Errorf("%s was classified as filtered DNS", address)
+		}
+	}
+
+	if !ryokuDNSFiltered(func(host string) ([]net.IP, error) {
+		if host != "repo.ryoku.dev" {
+			t.Fatalf("lookup host = %q", host)
+		}
+		return []net.IP{net.ParseIP("10.10.34.35")}, nil
+	}) {
+		t.Fatal("sinkhole lookup was not classified as filtered DNS")
+	}
+	if ryokuDNSFiltered(func(string) ([]net.IP, error) {
+		return nil, errors.New("resolver unavailable")
+	}) {
+		t.Fatal("resolver failure was classified as filtered DNS")
+	}
+}
 
 func TestParseOSRelease(t *testing.T) {
 	id, like, name := parseOSRelease("NAME=\"CachyOS\"\nPRETTY_NAME=\"CachyOS Linux\"\nID=cachyos\nID_LIKE=\"arch\"\n")
@@ -51,16 +87,16 @@ func TestSecureBootEnforcing(t *testing.T) {
 }
 
 func TestDefaultPlanSecureBoot(t *testing.T) {
-	f := &facts{hasNvidia: true, secureBoot: true}
+	f := &facts{hasNvidia: true, nouveauLive: true, secureBoot: true}
 	if defaultPlan(f).nvidia {
-		t.Fatal("secure boot must force the nvidia default off")
+		t.Fatal("unsigned secure boot must force the nvidia default off, even with nouveau live")
 	}
 	f.sbctlSigned = true
 	if !defaultPlan(f).nvidia {
-		t.Fatal("an sbctl-managed box keeps the nvidia default")
+		t.Fatal("an sbctl-managed box keeps the nvidia default, even with nouveau live")
 	}
-	if !defaultPlan(&facts{hasNvidia: true}).nvidia {
-		t.Fatal("no secure boot, nvidia stays default on")
+	if !defaultPlan(&facts{hasNvidia: true, nouveauLive: true}).nvidia {
+		t.Fatal("nouveau live without secure boot must default nvidia on")
 	}
 }
 

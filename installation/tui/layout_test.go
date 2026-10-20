@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -110,7 +112,7 @@ func TestChromeMatchesGrid(t *testing.T) {
 	banner := func(w, h int) bool {
 		return strings.Contains(wizardAt("review", w, h).fittedFrame(), "▀")
 	}
-	if !banner(80, 40) {
+	if !banner(80, 44) {
 		t.Error("a tall grid must keep the block banner")
 	}
 	if banner(80, 24) {
@@ -152,5 +154,56 @@ func TestBoxLinesPadsAndTruncates(t *testing.T) {
 	}
 	if !strings.HasPrefix(got[0], "ab") {
 		t.Errorf("short row lost its text: %q", got[0])
+	}
+}
+
+// The rail grows with every install question. On a short grid it has to scroll
+// around the current step: a rail taller than the grid pushed the frame past it,
+// and the clamp then cut off the card's title and the step being asked.
+func TestShortGridScrollsTheRail(t *testing.T) {
+	for _, sz := range [][2]int{{80, 24}, {80, 25}, {100, 24}} {
+		for _, key := range []string{"keyboard", "rashin", "username"} {
+			m := wizardAt(key, sz[0], sz[1])
+			got := stripSGR(m.fittedFrame())
+			for _, want := range []string{m.cur().title, "install steps", key} {
+				if !strings.Contains(got, want) {
+					t.Errorf("%s at %dx%d dropped %q", key, sz[0], sz[1], want)
+				}
+			}
+		}
+	}
+}
+
+// Every step is either on screen or counted in a marker, and the current one is
+// always on screen, whichever end of the list it sits at.
+func TestWindowRailAccountsForEveryStep(t *testing.T) {
+	steps := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+	for cur := range steps {
+		got := windowRail(steps, cur, 5)
+		if len(got) != 5 {
+			t.Fatalf("cur %d: %d rows, want 5", cur, len(got))
+		}
+		seen, counted := 0, 0
+		for _, row := range got {
+			plain := stripSGR(row)
+			if !strings.HasPrefix(plain, "↑ ") && !strings.HasPrefix(plain, "↓ ") {
+				seen++
+				continue
+			}
+			var n int
+			if _, err := fmt.Sscanf(plain[len("↑ "):], "%d more", &n); err != nil {
+				t.Fatalf("cur %d: unreadable marker %q", cur, plain)
+			}
+			counted += n
+		}
+		if seen+counted != len(steps) {
+			t.Errorf("cur %d: %d shown + %d counted != %d steps: %q", cur, seen, counted, len(steps), got)
+		}
+		if !slices.Contains(got, steps[cur]) {
+			t.Errorf("cur %d: current step scrolled out: %q", cur, got)
+		}
+	}
+	if got := windowRail(steps, 3, 0); len(got) != len(steps) {
+		t.Errorf("rows 0 must list every step, got %d", len(got))
 	}
 }

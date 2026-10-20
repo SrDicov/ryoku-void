@@ -15,6 +15,8 @@
 #   RYOKU_ISO_WORK    mkarchiso work   (./work)
 #   RYOKU_ISO_STAGE   staging tree     (./staging)
 #   RYOKU_ISO_REPRO   1 = pin packages to the commit-dated Arch archive (off)
+#   RYOKU_ISO_WORKTREE 1 = bake the working tree (uncommitted and untracked,
+#                     non-ignored files) instead of HEAD, for a local test ISO
 set -euo pipefail
 
 PROFILE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # installation/iso
@@ -43,6 +45,7 @@ export SOURCE_DATE_EPOCH
 # into the live motd. lets the target's deploy step warn when a long-lived
 # ISO's baked payload has drifted from the live [ryoku] repo's package version.
 PAYLOAD_COMMIT=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
+[[ ${RYOKU_ISO_WORKTREE:-0} != 1 ]] || PAYLOAD_COMMIT+="+worktree"
 PAYLOAD_DATE=$(git -C "$REPO_ROOT" log -1 --pretty=%cI 2>/dev/null || date -Iseconds)
 PAYLOAD_VERSION=$(tr -d '[:space:]' <"$REPO_ROOT/VERSION" 2>/dev/null || echo unknown)
 PAYLOAD_NAME=$(tr -d '[:space:]' <"$REPO_ROOT/CODENAME" 2>/dev/null || echo unknown)
@@ -63,10 +66,20 @@ case $VARIANT in plain | cachyos) ;; *) die "RYOKU_VARIANT must be plain or cach
 
 # bake the repo from tracked files only (git archive at HEAD), so gitignored
 # dev cruft (editor / AI-tooling configs, build dirs, ISOs) never ships.
+# RYOKU_ISO_WORKTREE=1 archives a tree of the working copy instead, written
+# through a throwaway index so no commit is made and the real index is untouched.
 stage_repo() {
-  local src=$1 dst=$2
+  local src=$1 dst=$2 tree=HEAD idx
   mkdir -p "$dst"
-  git -C "$src" archive --format=tar HEAD | tar -C "$dst" -xf -
+  if [[ ${RYOKU_ISO_WORKTREE:-0} == 1 ]]; then
+    idx=$(mktemp)
+    GIT_INDEX_FILE=$idx git -C "$src" read-tree HEAD
+    GIT_INDEX_FILE=$idx git -C "$src" add -A
+    tree=$(GIT_INDEX_FILE=$idx git -C "$src" write-tree)
+    rm -f "$idx"
+    log "RYOKU_ISO_WORKTREE=1: baking the working tree ($tree) instead of HEAD"
+  fi
+  git -C "$src" archive --format=tar "$tree" | tar -C "$dst" -xf -
 }
 
 # populate a local [ryoku] repo the staged pacman.conf's file:// token points at,
@@ -125,6 +138,7 @@ stage_ryoku_repo() {
 [[ -f $TUI_DIR/go.mod ]]         || die "installer TUI not found at $TUI_DIR"
 [[ -f $BACKEND_DIR/ryoku-install ]] || die "backend not found at $BACKEND_DIR/ryoku-install"
 [[ -d $BACKEND_DIR/lib ]]        || die "backend lib not found at $BACKEND_DIR/lib"
+[[ -f $REPO_ROOT/installation/installerplan/choices.tsv ]] || die "installer choice manifest not found"
 
 # 1. fresh profile copy. profile components only, never build dirs.
 log "Staging profile -> $PROFILE_STAGE"
@@ -178,6 +192,9 @@ install -m0644 "$REPO_ROOT/ryoku/i18n/langs.json" "$AIROOTFS/usr/share/ryoku/i18
 # 4. bake the repo payload at /usr/share/ryoku (RYOKU_REPO).
 log "Baking repo payload -> /usr/share/ryoku"
 stage_repo "$REPO_ROOT" "$AIROOTFS/usr/share/ryoku"
+install -d "$AIROOTFS/usr/share/ryoku/installation/installerplan"
+install -m0644 "$REPO_ROOT/installation/installerplan/choices.tsv" \
+  "$AIROOTFS/usr/share/ryoku/installation/installerplan/choices.tsv"
 
 # provenance stamp. records the exact commit + version baked into this payload
 # so the target's deploy step can flag drift from the live [ryoku] repo. keep

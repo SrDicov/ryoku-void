@@ -1,0 +1,21 @@
+# Template file for 'phinger-cursors'
+pkgname=phinger-cursors
+version=2.2
+revision=1
+create_wrksrc=yes
+skip_extraction="LICENSE"
+short_desc="Phinger XCursor themes"
+maintainer="Ryoku <releases@ryoku.dev>"
+license="CC-BY-SA-4.0"
+homepage="https://github.com/phisch/phinger-cursors"
+distfiles="${homepage}/releases/download/v${version}/phinger-cursors-variants.tar.bz2
+ ${homepage}/raw/v${version}/LICENSE"
+checksum="46d4cfc30a38c19cada3339027b5a78f7b0bf74f3220eba7001c4fdd9d5a6e56
+ 87a816969906840bf7af8d4d01cdfad4741b18946365e1f286007935509f2edb"
+
+
+do_install() {
+	vmkdir usr/share/icons
+	vcopy "phinger-*" usr/share/icons
+	vlicense "${XBPS_SRCDISTDIR}/${pkgname}-${version}/LICENSE"
+}

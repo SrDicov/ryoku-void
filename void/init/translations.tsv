@@ -1,0 +1,30 @@
+# Completeness manifest checked by tests/void-init.sh.
+# Columns: source, verdict, translation, notes (tab-separated).
+source	verdict	translation	notes
+ryoku/shell/systemd/user/ryoku-shell.service	translated	void/init/user/ryoku-shell	ExecStartPre/Post and ExecStop move into run/finish; StartLimitBurst is an accepted loss (doctor-side detection instead); KillMode=process is natural under runsv
+ryoku/shell/systemd/user/ryogami.service	translated	void/init/user/ryogami	same StartLimitBurst loss; MALLOC_CONF exported in run
+ryoku/shell/systemd/user/ryoku-idle.service	translated	void/init/user/ryoku-idle	Restart=on-failure becomes a finish script (exit 0 parks, non-zero restarts)
+ryoku/shell/systemd/user/ryoku-clamshell.service	translated	void/init/user/ryoku-clamshell	same on-failure finish translation; TimeoutStopSec has no runit analogue (sv down waits for the run child)
+ryoku/shell/systemd/user/ryoku-eq.service	translated	void/init/user/ryoku-eq	PartOf=pipewire becomes a dbus-name wait plus finish downs the service when pipewire is gone
+ryoku/shell/systemd/user/ryoku-bt-agent.service	translated	void/init/user/ryoku-bt-agent	After/Wants/PartOf=bluetooth becomes a dbus-name wait for org.freedesktop.DBus plus a bluetoothd readiness check; the tail -f stdin hold is kept
+ryoku/rashin/systemd/ryoku-ai-usage.service	translated	void/init/user/ryoku-ai-usage	loop service: the timer's schedule becomes a run loop with env-overridable delays
+ryoku/rashin/systemd/ryoku-ai-usage.timer	translated	void/init/user/ryoku-ai-usage	OnBootSec/OnUnitActiveSec/Persistent fold into the loop service above; runit has no timer units
+ryoku/shell/systemd/user/ryoku-bootstrap.service	translated	void/init/user/ryoku-bootstrap	oneshot: run does the work then exec sv down; ConditionPathExists markers kept; the session entrypoint restarts it before the rest of the user-service roster
+ryoku/shell/systemd/user/ryoku-session.target	translated	system/services/manifest.tsv	runit has no targets; session activation rows define the ordered roster that ryoku-host writes for each user
+ryoku/shell/systemd/user/niri.service.d/ryoku-bootstrap.conf	translated	void/init/user/ryoku-bootstrap	the drop-in's Wants/After=ryoku-bootstrap is folded into the roster ordering, where bootstrap runs first
+ryoku/shell/systemd/user/xdg-desktop-portal-gnome.service.d/10-ryoku.conf	accepted-loss	-	UnsetEnvironment=GDK_BACKEND is a systemd drop-in on a foreign unit; Void portals are D-Bus activated and do not use this user-manager drop-in
+ryoku/shell/systemd/user-environment-generators/60-ryoku-xdg-dirs	translated	void/init/env/xdg-dirs	environment-generator protocol replaced by a Turnstile envdir renderer
+ryoku/shell/environment.d/ryoku-session.conf	translated	void/init/env/environment-d	the user manager's environment.d reader becomes a profile.d hook (/etc/profile.d/ryoku-environment-d.sh) that SDDM's session script sources before the compositor; command substitution, quotes and backslashes are rejected because the hook runs in every login shell
+ryoku/rashin/systemd/ryoku-rashin.service	translated	void/init/user/ryoku-rashin	StartLimitIntervalSec=0 (retry forever) is runit's default; NoNewPrivileges has no runit analogue (accepted loss, the daemon drops its own privileges)
+ryoku/rashin/systemd/ryoku-prowl.service	translated	void/init/user/ryoku-prowl	BindsTo=ryoku-rashin becomes finish-side down propagation in ryoku-rashin's finish
+ryoku/palette-bridge/packaging/systemd/ryoku-palette-bridge.service	translated	void/init/user/ryoku-palette-bridge	After=graphical-session becomes a WAYLAND_DISPLAY wait; user service (the systemd original is per-user despite living under packaging/)
+/usr/lib/systemd/user/voxtype.service	translated	void/init/user/voxtype	graphical-session and PipeWire ordering become bounded waits; Restart=on-failure becomes a finish script and the service stays on demand
+ryoku/cli/systemd/ryoku-boot-guard.service	translated	void/init/system/ryoku-boot-guard	DefaultDependencies=no plus After=local-fs/network: runit stage 2 already implies local-fs; the network wait stays (nm-online inside boot-guard itself); Before=display-manager has no runit analogue (accepted loss: runit starts sddm in parallel, the guard is idempotent)
+ryoku/lockscreen/sddm/ryoku-greeter-guard.service	translated	void/init/system/ryoku-greeter-guard	After=display-manager has no runit analogue; the guard acts only once the sddm daemon is running, so starting beside it is equivalent
+ryoku/cli/systemd/ryoku.tmpfiles.conf	translated	void/init/system/ryoku-var-state	oneshot service that creates the /var/lib/ryoku tree with the same modes; Void has no tmpfiles.d
+/usr/lib/systemd/system/snapper-cleanup.timer	translated	void/init/system/snapper-cleanup	OnBootSec=10min and OnUnitActiveSec=1d become a loop around Void snapper's packaged cron cleanup
+system/hardware/network/ryoku-network-kill-guard.service	translated	void/init/system/ryoku-network-kill-guard	Before=network-pre/NetworkManager has no runit analogue; the guard runs as early as stage 2 allows and the residual race is recorded (firewall up before NM's first interface bind in practice)
+system/hardware/network/ryoku-network-kill-disconnect.service	translated	void/init/system/ryoku-network-kill-disconnect	Requires=guard becomes a wait on the guard's parked supervise state; WantedBy=NetworkManager.service is dropped (runit has no wants)
+system/hardware/bluetooth/ryoku-bluetooth-reset.service	translated	void/init/user/ryoku-bluetooth-reset	ExecStart=systemctl restart bluetooth becomes sv restart bluetoothd; the polkit rule does not transfer (see void/init/polkit/README.md)
+system/hardware/bluetooth/54-ryoku-bluetooth-a2dp.rules	accepted-loss	-	org.freedesktop.systemd1.manage-units does not exist under runit; the Void path restarts bluetoothd via sv as root from the session wrapper, no polkit grant needed
+installation/iso/airootfs/etc/systemd/system/*	accepted-loss	-	archiso live-image units (pacman-init, firstboot, timesyncd, getty, NetworkManager); the Void ISO has its own runit live-image service set

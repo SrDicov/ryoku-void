@@ -179,6 +179,7 @@ func TestActOutputEnablePreservesLayout(t *testing.T) {
 func TestActRejectsMissingArgs(t *testing.T) {
 	for _, args := range [][]string{
 		{"window.focus"},
+		{"window.place", "0xabc", "0", "0", "700"},
 		{"window.moveToWorkspace", "0xabc"},
 		{"workspace.focus"},
 		{"workspace.moveToOutput", "9"},
@@ -270,6 +271,7 @@ func TestActRejectsUnknownAction(t *testing.T) {
 func TestActTouchpadFlipsPadsAndTracksState(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	flag := filepath.Join(state, "ryoku", "touchpad.disabled")
 
 	prevNotify := touchpadNotify
@@ -339,6 +341,71 @@ func TestActTouchpadFlipsPadsAndTracksState(t *testing.T) {
 	}
 }
 
+// The freeze hands back the mode the user configured, read from the settings
+// store rather than the live option: a previous freeze whose restore was lost
+// leaves follow_mouse at 0 live, and reporting that back would "restore" the
+// stuck value. The store is the durable truth, and its default matches the
+// shipped input.lua.
+func TestActFocusFollowsMouseReportsConfiguredMode(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfg)
+	ryoku := filepath.Join(cfg, "ryoku")
+	if err := os.MkdirAll(ryoku, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := `{"desktop":{"input":{"followMouse":2}}}`
+	if err := os.WriteFile(filepath.Join(ryoku, "desktop.json"), []byte(store), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var evals []string
+	restore := stubCtl(t, func(args ...string) ([]byte, error) {
+		if len(args) == 2 && args[0] == "eval" {
+			evals = append(evals, args[1])
+		}
+		// A live getoption answering 0 (a lost restore) must not win: the
+		// store's 2 is what the caller gets back.
+		if len(args) == 3 && args[0] == "getoption" {
+			return []byte(`{"int":0}`), nil
+		}
+		return nil, nil
+	})
+	defer restore()
+
+	var buf bytes.Buffer
+	prevOut := stdout
+	stdout = bufio.NewWriter(&buf)
+	err := runAct([]string{"input.focusFollowsMouse", "0"})
+	stdout.Flush()
+	stdout = prevOut
+	if err != nil {
+		t.Fatalf("freeze: %v", err)
+	}
+	if got := strings.TrimSpace(buf.String()); got != "2" {
+		t.Errorf("reported previous mode = %q, want the configured 2", got)
+	}
+	if len(evals) != 1 || !strings.Contains(evals[0], "follow_mouse = 0") {
+		t.Errorf("freeze evals = %q, want one follow_mouse = 0 eval", evals)
+	}
+
+	// No store at all: the shipped default (1) is reported, never empty, so
+	// the caller always has a mode to put back.
+	if err := os.Remove(filepath.Join(ryoku, "desktop.json")); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	stdout = bufio.NewWriter(&buf)
+	err = runAct([]string{"input.focusFollowsMouse", "0"})
+	stdout.Flush()
+	stdout = prevOut
+	if err != nil {
+		t.Fatalf("freeze without store: %v", err)
+	}
+	if got := strings.TrimSpace(buf.String()); got != "1" {
+		t.Errorf("default reported mode = %q, want 1", got)
+	}
+}
+
 // output.cycle steps the arrangement through ryoku-monitor, so the pin is that
 // it execs `ryoku-monitor toggle`.
 func TestActOutputCycleRunsMonitorToggle(t *testing.T) {
@@ -360,6 +427,62 @@ func TestActOutputCycleRunsMonitorToggle(t *testing.T) {
 	}
 	if strings.TrimSpace(string(got)) != "toggle" {
 		t.Errorf("ryoku-monitor args = %q, want toggle", got)
+	}
+}
+
+// Placement receives output-local logical pixels. Hyprland's dispatcher takes
+// global logical coordinates, so only the output origin is added; fractional
+// scale must not be applied a second time.
+func TestWindowPlaceConvertsOutputLocalCoordinates(t *testing.T) {
+	var dispatches []string
+	restore := stubCtl(t, func(args ...string) ([]byte, error) {
+		switch {
+		case len(args) == 3 && args[0] == "monitors":
+			return []byte(`[{"id":2,"name":"DP-2","x":1600,"y":50,"width":2560,"height":1440,"scale":1.5}]`), nil
+		case len(args) == 2 && args[0] == "clients":
+			return []byte(`[{"address":"0xabc","floating":false}]`), nil
+		case len(args) == 2 && args[0] == "dispatch":
+			dispatches = append(dispatches, args[1])
+			return nil, nil
+		default:
+			t.Fatalf("unexpected hyprctl args: %q", args)
+			return nil, nil
+		}
+	})
+	defer restore()
+
+	if err := runAct([]string{"window.place", "0xabc", "100", "180", "700", "520", "DP-2"}); err != nil {
+		t.Fatalf("window.place: %v", err)
+	}
+	if len(dispatches) != 4 {
+		t.Fatalf("dispatch count = %d, want float, output, size, position: %q", len(dispatches), dispatches)
+	}
+	last := dispatches[len(dispatches)-1]
+	if !strings.Contains(last, "x = 1700") || !strings.Contains(last, "y = 230") {
+		t.Errorf("position dispatcher = %q, want global logical 1700,230", last)
+	}
+	if strings.Contains(last, "1750") || strings.Contains(last, "320") {
+		t.Errorf("position dispatcher double-applied output scale: %q", last)
+	}
+}
+
+func TestWindowPlaceRejectsInvalidOutputScaleBeforeMutation(t *testing.T) {
+	dispatched := false
+	restore := stubCtl(t, func(args ...string) ([]byte, error) {
+		if len(args) == 3 && args[0] == "monitors" {
+			return []byte(`[{"id":2,"name":"DP-2","scale":0}]`), nil
+		}
+		dispatched = true
+		return nil, nil
+	})
+	defer restore()
+
+	err := runAct([]string{"window.place", "0xabc", "0", "0", "700", "520", "DP-2"})
+	if err == nil || !strings.Contains(err.Error(), "invalid scale") {
+		t.Fatalf("window.place invalid scale error = %v", err)
+	}
+	if dispatched {
+		t.Error("window.place mutated the compositor after invalid output geometry")
 	}
 }
 
@@ -426,5 +549,40 @@ func TestCursorReassertUsesResolvedStoreTheme(t *testing.T) {
 	}
 	if len(got) < 3 || got[0] != "setcursor" || got[1] == "" || got[1] == "DYNAMIC" || got[2] != "18" {
 		t.Fatalf("setcursor args = %v, want a resolved theme at size 18", got)
+	}
+}
+
+// window.hide stashes a named window in the scratchpad without following it,
+// and hands the focused case to the same helper Super+H runs, which also undoes
+// the focus a silent move drags into the special workspace.
+func TestActWindowHide(t *testing.T) {
+	var dispatched []string
+	restore := stubCtl(t, func(args ...string) ([]byte, error) {
+		if len(args) == 2 && args[0] == "dispatch" {
+			dispatched = append(dispatched, args[1])
+		}
+		return nil, nil
+	})
+	defer restore()
+	var helper [][]string
+	prev := runWorkspaceHelper
+	runWorkspaceHelper = func(args ...string) error { helper = append(helper, args); return nil }
+	defer func() { runWorkspaceHelper = prev }()
+
+	if err := runAct([]string{"window.hide", "0xbbb"}); err != nil {
+		t.Fatal(err)
+	}
+	want := `hl.dsp.window.move({ workspace = "special:scratch", window = "address:0xbbb", follow = false })`
+	if len(dispatched) != 1 || dispatched[0] != want {
+		t.Errorf("dispatched %q, want %q", dispatched, want)
+	}
+	if err := runAct([]string{"window.hide", "focused"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(helper) != 1 || strings.Join(helper[0], " ") != "hide" {
+		t.Errorf("helper calls = %q, want one hide", helper)
+	}
+	if err := runAct([]string{"window.hide"}); err == nil {
+		t.Error("window.hide without a target must fail")
 	}
 }

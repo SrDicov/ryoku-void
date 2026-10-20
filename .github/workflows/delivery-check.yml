@@ -1,9 +1,9 @@
 name: Delivery check
 
-# Guards that what a dev box runs actually reaches an installed box: every
-# ryoku/apps config is shipped by a package/installer/deploy path (a hard fail),
-# and how far main (what the [ryoku] repo publishes) lags unstable-dev (a
-# warning, since main advances by a deliberate fast-forward). See docs/updates.md.
+# Guards that what a dev box runs actually reaches an installed box, and that
+# every Arch package has a built package or an explained translation for Void
+# and Fedora. Publish lag stays a warning because main advances by a deliberate
+# fast-forward. See docs/updates.md.
 
 on:
   push:
@@ -25,6 +25,21 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Test edition parity gate
+        run: bash tests/edition-parity.sh
+
+      - name: Verify edition package parity
+        run: bin/ryoku-edition-parity
+
+      - name: Verify Fedora package dependencies
+        run: bash tests/fedora-packages.sh
+
+      - name: Verify Fedora's snapshot boot menu
+        run: bash tests/snapshot-boot.sh
+
+      - name: Verify every edition stages the same payload
+        run: bash tests/payload-parity.sh
 
       - name: Verify update delivery
         run: |

@@ -7,11 +7,13 @@ tmp="$(mktemp -d)"
 holder=""
 legacy_pid=""
 policy_pid=""
+lid_changer_pid=""
 session_probe_pid=""
 cleanup() {
   [[ -z $holder ]] || kill "$holder" 2>/dev/null || true
   [[ -z $legacy_pid ]] || kill "$legacy_pid" 2>/dev/null || true
   [[ -z $policy_pid ]] || kill "$policy_pid" 2>/dev/null || true
+  [[ -z $lid_changer_pid ]] || kill "$lid_changer_pid" 2>/dev/null || true
   [[ -z $session_probe_pid ]] || kill "$session_probe_pid" 2>/dev/null || true
   rm -rf "$tmp"
 }
@@ -51,14 +53,24 @@ if [[ ${1:-} == suspend && ${2:-} == transaction ]]; then
     while [[ ! -e $RYOKU_SHELL_BLOCK_DIR/cancelled-$3 ]]; do sleep 0.01; done
     exit 1
   fi
-  [[ ${RYOKU_SHELL_FAIL:-0} != 1 ]]
-  exit
+  if [[ ${RYOKU_SHELL_FAIL:-0} == 1 ]]; then
+    printf 'ryoku-shell: %s\n' "${RYOKU_SHELL_FAIL_REASON:-sleep guard is unavailable}" >&2
+    exit 1
+  fi
+  exit 0
 fi
 printf 'shell %s\n' "$*" >>"$CLAMSHELL_EVENTS"
 [[ ${RYOKU_SHELL_FAIL:-0} != 1 ]]
 EOF
 cat >"$bin/ryoku" <<'EOF'
 #!/usr/bin/env bash
+if [[ $* == "wm caps" ]]; then
+  case "${RYOKU_LID_EDGE_SOURCE:-}" in
+    system) printf '{"supports":["systemLidEdgeSource"]}\n' ;;
+    *) printf '{"supports":[]}\n' ;;
+  esac
+  exit 0
+fi
 [[ -n ${RYOKU_WM_CALL_TIMEOUT:-} ]] || exit 97
 printf 'ryoku %s\n' "$*" >>"$CLAMSHELL_EVENTS"
 if [[ $* == "wm state" ]]; then
@@ -76,13 +88,13 @@ cat >"$bin/ryoku-monitor" <<'EOF'
 #!/usr/bin/env bash
 printf 'monitor %s\n' "$*" >>"$CLAMSHELL_EVENTS"
 EOF
-cat >"$bin/systemd-inhibit" <<'EOF'
+cat >"$bin/ryoku-host" <<'EOF'
 #!/usr/bin/env bash
-if [[ ${1:-} == --list ]]; then
-  printf '%s\n' "${INHIBIT_JSON:-[]}"
-  exit 0
-fi
-exit 1
+[[ ${1:-} == inhibit ]] || exit 2
+shift
+while [[ ${1:-} == --* ]]; do shift; done
+[[ $# -gt 0 ]] || exit 2
+exec "$@"
 EOF
 cat >"$bin/pgrep" <<'EOF'
 #!/usr/bin/env bash
@@ -94,8 +106,20 @@ cat >"$bin/loginctl" <<'EOF'
 [[ ${1:-} == show-session && ${3:-} == -p && ${4:-} == Active ]] || exit 1
 printf '%s\n' "${SESSION_ACTIVE_VALUE:-yes}"
 EOF
+cat >"$bin/logger" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${JOURNAL_STUB:-/dev/null}"
+EOF
 cat >"$bin/busctl" <<'EOF'
 #!/usr/bin/env bash
+if [[ $* == *ListInhibitors* ]]; then
+  if [[ -n ${INHIBIT_JSON:-} ]]; then
+    printf '%s\n' "$INHIBIT_JSON"
+  else
+    printf '%s\n' '{"type":"a(ssssuu)","data":[[]]}'
+  fi
+  exit 0
+fi
 state="${UPOWER_LID_STATE:-unknown}"
 if [[ -r ${UPOWER_LID_STATE_FILE:-} ]]; then
   state="$(<"$UPOWER_LID_STATE_FILE")"
@@ -132,7 +156,7 @@ set_lid() { printf 'state:      %s\n' "$1" >"$lid/state"; }
 reset_case() {
   : >"$events"
   rm -f "$state" "$daemon_state" "$event_state" "$panel_state" "$suspend_state"
-  export INHIBIT_JSON='[]'
+  export INHIBIT_JSON='{"type":"a(ssssuu)","data":[[]]}'
   unset RYOKU_SHELL_FAIL || true
   unset RYOKU_CLAMSHELL_RETRY || true
   unset RYOKU_FAIL_PANEL_ONCE || true
@@ -142,6 +166,7 @@ reset_case() {
   unset SESSION_ACTIVE_VALUE || true
   unset UPOWER_LID_STATE || true
   unset RYOKU_SHELL_BLOCK_DIR || true
+  unset RYOKU_LID_EDGE_SOURCE || true
 }
 run_helper() { "$helper" "$@" >"$tmp/helper.out" 2>&1; }
 expect_events() {
@@ -175,7 +200,7 @@ sleep 60 &
 holder=$!
 printf '%s\n' "$holder" >"$state"
 uid="$(id -u)"
-export INHIBIT_JSON="[{\"who\":\"ryoku-clamshell\",\"uid\":$uid,\"pid\":$holder,\"what\":\"handle-lid-switch\",\"mode\":\"block\"}]"
+export INHIBIT_JSON="{\"type\":\"a(ssssuu)\",\"data\":[[[\"handle-lid-switch\",\"ryoku-clamshell\",\"test\",\"block\",$uid,$holder]]]}"
 run_helper policy close
 expect_events ''
 kill "$holder" 2>/dev/null || true
@@ -198,7 +223,7 @@ reset_case
 sleep 60 &
 holder=$!
 printf '%s\n' "$holder" >"$state"
-export INHIBIT_JSON='[]'
+export INHIBIT_JSON='{"type":"a(ssssuu)","data":[[]]}'
 if run_helper stop; then
   printf 'stop accepted an unverified live inhibitor pid\n' >&2
   exit 1
@@ -246,6 +271,52 @@ UPOWER_LID_STATE=closed bash -c '
   evaluate
 ' _ "$helper"
 expect_events 'shell suspend'
+
+# The provider seam, not a compositor name, decides whether the daemon supplies
+# physical edges. An older caps payload keeps compositor callbacks as the
+# backwards-compatible default.
+RYOKU_LID_EDGE_SOURCE=system bash -c '
+  source "$1"
+  [[ $(provider_lid_edge_source) == system ]]
+' _ "$helper"
+bash -c '
+  source "$1"
+  [[ $(provider_lid_edge_source) == compositor ]]
+' _ "$helper"
+
+# The system source is live and edge-triggered. Stubbed ACPI state changes emit
+# one initial state and then exactly one event for each transition.
+reset_case
+set_lid open
+lid_watch_events="$tmp/lid-watch-events"
+(
+  sleep 0.05
+  set_lid closed
+  sleep 0.05
+  set_lid open
+) &
+lid_changer_pid=$!
+if WATCH_EVENTS="$lid_watch_events" RYOKU_CLAMSHELL_LID_POLL=0.01 \
+  bash -c '
+    source "$1"
+    send_event() {
+      printf "%s\n" "$1" >>"$WATCH_EVENTS"
+      [[ $(wc -l <"$WATCH_EVENTS") -lt 3 ]]
+    }
+    monitor_system_lid_edges
+  ' _ "$helper"; then
+  printf 'system lid monitor did not stop after the stub captured its edges\n' >&2
+  exit 1
+fi
+wait "$lid_changer_pid"
+lid_changer_pid=""
+want_edges=$'RYOKU_LID_EDGE open\nRYOKU_LID_EDGE closed\nRYOKU_LID_EDGE open'
+got_edges="$(cat "$lid_watch_events")"
+if [[ $got_edges != "$want_edges" ]]; then
+  printf 'lid watcher edge mismatch\nwant:\n%s\ngot:\n%s\n' \
+    "$want_edges" "$got_edges" >&2
+  exit 1
+fi
 
 # A new daemon generation discards any persisted compositor edge before using
 # UPower as its physical startup seed.
@@ -339,6 +410,37 @@ fi
 set_lid open
 wait "$policy_pid"
 policy_pid=""
+
+# The rejection reason reaches the journal, and identical consecutive reasons
+# are journalled once: a retry loop must not flood the journal while the lid
+# stays closed.
+reset_case
+set_ac 0
+set_external disconnected
+set_lid closed
+export RYOKU_SHELL_FAIL=1
+export RYOKU_SHELL_FAIL_REASON='daemon not reachable at /run/user/9/ryoku-shell.sock'
+export RYOKU_CLAMSHELL_RETRY=0.01
+journal="$tmp/journal"
+export JOURNAL_STUB="$journal"
+run_helper policy close &
+policy_pid=$!
+for _ in {1..100}; do
+  [[ $(grep -c '^shell suspend$' "$events" 2>/dev/null || true) -ge 3 ]] && break
+  sleep 0.01
+done
+set_lid open
+wait "$policy_pid"
+policy_pid=""
+grep -q 'daemon not reachable' "$journal" || {
+  printf 'the suspend rejection reason never reached the journal\n' >&2
+  exit 1
+}
+reasons=$(grep -c 'daemon not reachable' "$journal" || true)
+if (( reasons != 1 )); then
+  printf 'the identical rejection reason was journalled %s times, want 1\n' "$reasons" >&2
+  exit 1
+fi
 
 # A compositor close event remains authoritative when ACPI exposes no readable
 # lid state. A rejected transaction retries until the matching open event
@@ -451,7 +553,7 @@ set_lid closed
 sleep 60 &
 holder=$!
 printf '%s\n' "$holder" >"$state"
-export INHIBIT_JSON="[{\"who\":\"ryoku-clamshell\",\"uid\":$uid,\"pid\":$holder,\"what\":\"handle-lid-switch\",\"mode\":\"block\"}]"
+export INHIBIT_JSON="{\"type\":\"a(ssssuu)\",\"data\":[[[\"handle-lid-switch\",\"ryoku-clamshell\",\"test\",\"block\",$uid,$holder]]]}"
 export RYOKU_OUTPUT_DISABLED=false
 run_helper lid close
 expect_events $'ryoku wm state\nryoku wm act output.enable eDP-1 off'
@@ -484,7 +586,7 @@ export UPOWER_LID_STATE=closed
 sleep 60 &
 holder=$!
 printf '%s\n' "$holder" >"$state"
-export INHIBIT_JSON="[{\"who\":\"ryoku-clamshell\",\"uid\":$uid,\"pid\":$holder,\"what\":\"handle-lid-switch\",\"mode\":\"block\"}]"
+export INHIBIT_JSON="{\"type\":\"a(ssssuu)\",\"data\":[[[\"handle-lid-switch\",\"ryoku-clamshell\",\"test\",\"block\",$uid,$holder]]]}"
 export RYOKU_OUTPUT_DISABLED=false
 run_helper lid sync
 expect_events $'ryoku wm state\nryoku wm act output.enable eDP-1 off'
@@ -504,7 +606,7 @@ set_lid closed
 sleep 60 &
 holder=$!
 printf '%s\n' "$holder" >"$state"
-export INHIBIT_JSON="[{\"who\":\"ryoku-clamshell\",\"uid\":$uid,\"pid\":$holder,\"what\":\"handle-lid-switch\",\"mode\":\"block\"}]"
+export INHIBIT_JSON="{\"type\":\"a(ssssuu)\",\"data\":[[[\"handle-lid-switch\",\"ryoku-clamshell\",\"test\",\"block\",$uid,$holder]]]}"
 export RYOKU_OUTPUT_DISABLED=false
 export RYOKU_FAIL_PANEL_ONCE="$tmp/panel-close-failed-once"
 export RYOKU_CLAMSHELL_RETRY=0.01
@@ -527,7 +629,7 @@ set_lid closed
 sleep 60 &
 holder=$!
 printf '%s\n' "$holder" >"$state"
-export INHIBIT_JSON="[{\"who\":\"ryoku-clamshell\",\"uid\":$uid,\"pid\":$holder,\"what\":\"handle-lid-switch\",\"mode\":\"block\"}]"
+export INHIBIT_JSON="{\"type\":\"a(ssssuu)\",\"data\":[[[\"handle-lid-switch\",\"ryoku-clamshell\",\"test\",\"block\",$uid,$holder]]]}"
 export RYOKU_OUTPUT_DISABLED=true
 run_helper lid close
 expect_events 'ryoku wm state'
@@ -626,7 +728,7 @@ sleep 0.05
 sleep 60 &
 holder=$!
 printf '%s\n' "$holder" >"$state"
-export INHIBIT_JSON="[{\"who\":\"ryoku-clamshell\",\"uid\":$uid,\"pid\":$holder,\"what\":\"handle-lid-switch\",\"mode\":\"block\"}]"
+export INHIBIT_JSON="{\"type\":\"a(ssssuu)\",\"data\":[[[\"handle-lid-switch\",\"ryoku-clamshell\",\"test\",\"block\",$uid,$holder]]]}"
 run_helper stop
 for _ in {1..40}; do
   kill -0 "$legacy_pid" 2>/dev/null || break
