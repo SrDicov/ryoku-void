@@ -3,18 +3,18 @@
 ## Unreleased
 
 ### New
+- **The installer now imports the z-repo key in the shape xbps trusts.** The
+  fetched PEM was dropped into `/var/db/xbps/keys` under a fixed name xbps
+  never reads, so every sync raised the interactive import prompt that fails
+  without a TTY. The installer now pins the key against its printed
+  fingerprint and writes the `<fingerprint>.plist` xbps looks up, verified on
+  a real Void: the key is accepted and the package signatures verify without
+  any prompt.
 - **The Void installer wires the z-repo lane.** After the Ryoku XBPS step the
   installer imports the z-repo public key and writes its repository file, then
   installs the third-party extras it serves best effort, and the uninstall
   removes both again. The Void edition resolves the Hyprland lane from the
   z-repo, so Hyprland is a Void compositor choice.
-
-### Changed
-- The Void dry-run verify note names the chosen compositor session instead of
-  niri.
-
-<<<<<<< HEAD
-### New
 - **Void Linux is now a supported host.** `install.sh` and the binary accept
   `xbps-install`, the new `zrepo` step trusts the signed z-repo binary
   repository (Void imports its key from the signed index on the first sync),
@@ -31,14 +31,6 @@
   `exit 1` on a machine with no `systemd-inhibit`, so the lock screen could
   never be unlocked. It now detects the missing systemd tooling, skips only the
   sleep-block guard and still enforces the proof and the session check.
-
-### Changed
-- **The fork now fetches and tracks its own repository.** The payload clone,
-  `ryoku-track`, `ryoku recovery` and the issue link point at
-  `SrDicov/ryoku-void`, and the CLI's channel tracking accepts a checkout
-  whose origin is the fork.
-=======
-### Added
 - **The script installer now uses the ISO install catalogue.** It offers the
   file manager, Rashin, Ryoku apps, required edition components, and the
   optional CachyOS layer on plain Arch. Unattended runs can make the same
@@ -100,7 +92,14 @@
   with stable packages and failed on packages only testing carries. A rerun
   from the other ref moves the channel and redoes the payload and package
   steps, so a stuck stable install can be finished on unstable.
->>>>>>> origin/unstable-dev
+
+### Changed
+- The Void dry-run verify note names the chosen compositor session instead of
+  niri.
+- **The fork now fetches and tracks its own repository.** The payload clone,
+  `ryoku-track`, `ryoku recovery` and the issue link point at
+  `SrDicov/ryoku-void`, and the CLI's channel tracking accepts a checkout
+  whose origin is the fork.
 
 ### Fixed
 - **Uninstalling on Fedora stops trusting Ryoku's signing key.** Removing the
