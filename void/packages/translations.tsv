@@ -68,8 +68,8 @@ gst-plugins-base	gst-plugins-base1	desktop
 gst-plugins-good	gst-plugins-good1	desktop	
 gst-plugins-ugly	gst-plugins-ugly1	desktop	
 gtk3	gtk+3	desktop	
-gtk4	gtk4	hyprland	repo=zrepo
-gtk4-layer-shell	gtk4-layer-shell	hyprland	repo=zrepo
+gtk4	gtk4	hyprland	
+gtk4-layer-shell	gtk4-layer-shell	hyprland	
 gum	gum	desktop	
 hidapi	hidapi	optional	
 hypr-dynamic-cursors	hypr-dynamic-cursors	hyprland	repo=zrepo
