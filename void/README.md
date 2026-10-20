@@ -4,8 +4,9 @@ This directory contains the experimental x86_64 glibc Void edition. It uses
 runit, Turnstile, elogind, SDDM, and niri. XBPS and runit integration stays
 here; runtime code reaches it through `ryoku-host`.
 
-Hyprland is not shipped. Ryoku requires Hyprland 0.55+, which requires GCC 15
-and C++26, while Void currently ships GCC 14.
+Void cannot build Hyprland 0.55+ (it needs GCC 15 and C++26, while Void ships
+GCC 14), so the Hyprland edition rides the third-party signed z-repo, which
+the shell installer wires on Void. See `docs/void.md`.
 
 ## Layout
 
@@ -78,7 +79,7 @@ btrfs root and snapper; `ryoku doctor` converges the root snapper config.
 
 ## Remaining limits
 
-- niri only, because Ryoku's Hyprland needs GCC 15 and Void ships GCC 14
+- Hyprland only through the z-repo; the lane breaks if that repository moves
 - no Wayfire, because Void ships 0.10 and Ryoku requires 0.11
 - Zen Browser, LocalSend, and Voxtype are AUR-only
 - no asusctl or adw-gtk-theme package

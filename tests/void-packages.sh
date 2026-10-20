@@ -188,7 +188,7 @@ NR == 1 {
 		if ($2 == "@repo" && $4 != "Ryoku-owned package built from the checkout.")
 			bad("@repo mapping has the wrong ownership note")
 	} else {
-		if ($4 != "" && $4 !~ /^repo=(ryoku|multilib|nonfree|multilib-nonfree)$/)
+		if ($4 != "" && $4 !~ /^repo=(ryoku|zrepo|multilib|nonfree|multilib-nonfree)$/)
 			bad("invalid repository declaration " $4)
 		count = split($2, names, /[[:space:]]+/)
 		for (i = 1; i <= count; i++) if (!package_name(names[i])) bad("invalid Void package " names[i])
@@ -358,7 +358,7 @@ if [[ $MODE == --repo ]]; then
 	repo_rows=$(
 		{
 			awk -F '\t' '
-				NR == 1 || /^#/ || $2 == "-" || $2 == "@repo" || $4 == "repo=ryoku" { next }
+				NR == 1 || /^#/ || $2 == "-" || $2 == "@repo" || $4 == "repo=ryoku" || $4 == "repo=zrepo" { next }
 				{
 					repository = "main"
 					if ($4 ~ /^repo=/) repository = substr($4, 6)

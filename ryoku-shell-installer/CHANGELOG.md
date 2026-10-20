@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### New
+- **The Void installer wires the z-repo lane.** After the Ryoku XBPS step the
+  installer imports the z-repo public key and writes its repository file, then
+  installs the third-party extras it serves best effort, and the uninstall
+  removes both again. The Void edition resolves the Hyprland lane from the
+  z-repo, so Hyprland is a Void compositor choice.
+
+### Changed
+- The Void dry-run verify note names the chosen compositor session instead of
+  niri.
+
 <<<<<<< HEAD
 ### New
 - **Void Linux is now a supported host.** `install.sh` and the binary accept

@@ -68,21 +68,21 @@ gst-plugins-base	gst-plugins-base1	desktop
 gst-plugins-good	gst-plugins-good1	desktop	
 gst-plugins-ugly	gst-plugins-ugly1	desktop	
 gtk3	gtk+3	desktop	
-gtk4	-	hyprland	Hyprland is not packaged on Void.
-gtk4-layer-shell	-	hyprland	Hyprland is not packaged on Void.
+gtk4	gtk4	hyprland	repo=zrepo
+gtk4-layer-shell	gtk4-layer-shell	hyprland	repo=zrepo
 gum	gum	desktop	
 hidapi	hidapi	optional	
-hypr-dynamic-cursors	-	hyprland	Hyprland is not packaged on Void.
-hyprglass	-	hyprland	Hyprland is not packaged on Void.
-hyprgrass	-	hyprland	Hyprland is not packaged on Void.
+hypr-dynamic-cursors	hypr-dynamic-cursors	hyprland	repo=zrepo
+hyprglass	hyprglass	hyprland	repo=zrepo
+hyprgrass	hyprgrass	hyprland	repo=zrepo
 hypridle	swayidle	desktop	
-hyprland	-	hyprland	Ryoku's Hyprland needs GCC 15 and Void still ships GCC 14.
-hyprland-preview-share-picker	-	hyprland	Hyprland is not packaged on Void.
+hyprland	hyprland	hyprland	repo=zrepo
+hyprland-preview-share-picker	hyprland-preview-share-picker	hyprland	repo=zrepo
 hyprpicker	hyprpicker	desktop	
-hyprpolkitagent	-	hyprland	Hyprland is not packaged on Void.
-hyprsunset	-	hyprland	Hyprland is not packaged on Void.
+hyprpolkitagent	hyprpolkitagent	hyprland	repo=zrepo
+hyprsunset	hyprsunset	hyprland	repo=zrepo
 imagemagick	ImageMagick	desktop	
-imgborders	-	hyprland	Hyprland is not packaged on Void.
+imgborders	imgborders	hyprland	repo=zrepo
 inetutils	inetutils	optional	
 inotify-tools	inotify-tools	desktop	
 intel-media-driver	intel-media-driver	hardware:intel	
@@ -200,13 +200,13 @@ ryoku-cursor-material	ryoku-cursor-material	desktop	repo=ryoku
 ryoku-cursors	ryoku-cursors	desktop	repo=ryoku
 ryoku-desktop	@repo	desktop	Ryoku-owned package built from the checkout.
 ryoku-desktop-compositor	-	desktop	Virtual dependency provided by a compositor meta-package.
-ryoku-desktop-hyprland	-	hyprland	Ryoku's Hyprland needs GCC 15 and Void still ships GCC 14.
+ryoku-desktop-hyprland	ryoku-desktop-hyprland	hyprland	repo=zrepo
 ryoku-desktop-niri	@repo	desktop	Ryoku-owned package built from the checkout.
 ryoku-desktop-wayfire	-	wayfire	Void ships Wayfire 0.11, but the Ryoku provider and depthdeck variant are not packaged or VM-verified.
 ryoku-hub	@repo	desktop	Ryoku-owned package built from the checkout.
-ryoku-hypr-plugins	-	hyprland	Hyprland is not packaged on Void.
+ryoku-hypr-plugins	ryoku-hypr-plugins	hyprland	repo=zrepo
 ryoku-keyring	ryoku-keyring	desktop	repo=ryoku
-ryoku-keysounds	-	hyprland	Hyprland is not packaged on Void.
+ryoku-keysounds	ryoku-keysounds	hyprland	repo=zrepo
 ryoku-keysounds-niri	@repo	optional	Ryoku-owned package built from the checkout.
 ryoku-keysounds-profiles	@repo	optional	Ryoku-owned package built from the checkout.
 ryoku-oh-my-zsh	ryoku-oh-my-zsh	desktop	repo=ryoku
@@ -273,7 +273,7 @@ wtype	wtype	desktop
 xcb-util-cursor	xcb-util-cursor	desktop	
 xdg-desktop-portal-gnome	xdg-desktop-portal-gnome	desktop	
 xdg-desktop-portal-gtk	xdg-desktop-portal-gtk	desktop	
-xdg-desktop-portal-hyprland	-	hyprland	Hyprland is not packaged on Void.
+xdg-desktop-portal-hyprland	xdg-desktop-portal-hyprland	hyprland	repo=zrepo
 xdg-desktop-portal-wlr	-	wayfire	Void ships Wayfire 0.11, but the Ryoku provider and depthdeck variant are not packaged or VM-verified.
 xdg-user-dirs	xdg-user-dirs	desktop	
 xdg-utils	xdg-utils	desktop	

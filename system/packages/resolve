@@ -112,7 +112,7 @@ BEGIN {
 	repository = "main"
 	if (edition == "void" && $4 ~ /^repo=/) {
 		repository = substr($4, 6)
-		if (repository !~ /^(ryoku|multilib|nonfree|multilib-nonfree)$/)
+		if (repository !~ /^(ryoku|zrepo|multilib|nonfree|multilib-nonfree)$/)
 			bad("unknown package repository " repository)
 	}
 
@@ -128,7 +128,7 @@ BEGIN {
 			bad("@repo mapping must use the checkout-owned package note")
 	} else {
 		if (edition == "void" && $4 != "" &&
-		    $4 !~ /^repo=(ryoku|multilib|nonfree|multilib-nonfree)$/)
+		    $4 !~ /^repo=(ryoku|zrepo|multilib|nonfree|multilib-nonfree)$/)
 			bad("plain mapping notes must be a repository declaration")
 		name_count = split($2, names, /[[:space:]]+/)
 		for (i = 1; i <= name_count; i++)

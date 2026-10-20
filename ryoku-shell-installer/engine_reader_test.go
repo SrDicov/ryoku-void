@@ -131,8 +131,8 @@ func TestVoidPackagedTransactionsContainMetaPackagesWithoutBuildSet(t *testing.T
 			commands = append(commands, line.line)
 		}
 	}
-	if len(commands) != 2 {
-		t.Fatalf("xbps transactions = %v, want one enabler and one package transaction", commands)
+	if len(commands) != 3 {
+		t.Fatalf("xbps transactions = %v, want an enabler, the package transaction, and the z-repo extras", commands)
 	}
 	if !strings.Contains(commands[0], "void-repo-") {
 		t.Fatalf("first transaction does not enable a Void repository: %q", commands[0])
@@ -141,6 +141,9 @@ func TestVoidPackagedTransactionsContainMetaPackagesWithoutBuildSet(t *testing.T
 		if !strings.Contains(" "+commands[1]+" ", " "+pkg+" ") {
 			t.Errorf("package transaction missing %s: %q", pkg, commands[1])
 		}
+	}
+	if !strings.Contains(" "+commands[2]+" ", " zen-browser-bin ") {
+		t.Errorf("extras transaction missing zen-browser-bin: %q", commands[2])
 	}
 	for _, buildPkg := range []string{" go ", " cmake "} {
 		if strings.Contains(" "+commands[1]+" ", buildPkg) {
@@ -396,7 +399,7 @@ func TestVoidDefaultsToFirstPackagedProvider(t *testing.T) {
 	}
 	available := edition.choices.AvailableIDs(installerplan.Compositor)
 	p := defaultPlan(&facts{distro: voidLinux}, available)
-	if p.compositor != available[0] || p.compositor != "niri" {
+	if p.compositor != available[0] || p.compositor != "hyprland" {
 		t.Fatalf("Void provider = %q, available = %v", p.compositor, available)
 	}
 }

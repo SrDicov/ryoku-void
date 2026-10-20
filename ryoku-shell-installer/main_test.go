@@ -271,7 +271,6 @@ func TestVoidPlanShowsEditionNotice(t *testing.T) {
 		t.Fatalf("Void notice text does not contain %q: %v", updateNotice, notice)
 	}
 	for _, want := range []string{
-		"Hyprland unavailable: Ryoku's Hyprland needs GCC 15 and Void still ships GCC 14.",
 		"Wayfire unavailable: Void ships Wayfire 0.11, but the Ryoku provider and depthdeck variant are not packaged or VM-verified.",
 		"Zen unavailable: Zen ships only as an upstream binary build; Ryoku does not mirror a browser it cannot keep current",
 	} {
@@ -281,8 +280,7 @@ func TestVoidPlanShowsEditionNotice(t *testing.T) {
 	}
 	voidPlan := render(voidLinux, true, voidEdition)
 	for _, want := range []string{
-		"Compositors: niri.",
-		"Hyprland unavailable:",
+		"Compositors: hyprland, niri.",
 		"Wayfire unavailable:",
 		"Zen unavailable:",
 		"snapshot rollback: ready",

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### New
+- `resolve`: **`repo=zrepo` maps a Void row to the third-party signed z-repo.**
+  The installer configures that repository, so the resolver prints no enabler
+  package for it and the Hyprland lane translates to the z-repo packages it
+  serves.
+
 ### Added
 - `base.packages`: **khal, vdirsyncer and translate-shell.** The dock's
   calendar reads and syncs calendars through khal and vdirsyncer, and the

@@ -9,13 +9,16 @@ file covers what the z-repo lane adds on top of it.
 
 The Void edition installs signed packages from the Ryoku XBPS repository, and
 `void/packages/translations.tsv` maps every shared package lane to a Void
-package. Entries marked `-` carry the reason they cannot enter the repo. Two
-groups matter here.
+package, or to the z-repo package that serves it through `repo=zrepo`. The
+Hyprland family rides that lane: Void's toolchain cannot build it, the z-repo
+serves the whole stack, so the table points each row at the same-named package
+in the z-repo instead of marking it `-`. Entries marked `-` carry the reason
+they cannot enter any repository.
 
-**Hyprland.** The table marks the whole Hyprland family unavailable with the
-note that "Ryoku's Hyprland needs GCC 15 and Void still ships GCC 14". That is
-true for a plain Void toolchain: Hyprland 0.56 sets `CMAKE_CXX_STANDARD 26` and
-its sources use `#embed`, `std::string + std::string_view`,
+**Hyprland.** The table used to mark the whole Hyprland family unavailable with
+the note that "Ryoku's Hyprland needs GCC 15 and Void still ships GCC 14". That
+is true for a plain Void toolchain: Hyprland 0.56 sets `CMAKE_CXX_STANDARD 26`
+and its sources use `#embed`, `std::string + std::string_view`,
 `std::ranges::starts_with`, and `std::vector::insert_range`, none of which
 libstdc++ 14 carries.
 

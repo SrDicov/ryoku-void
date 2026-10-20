@@ -41,6 +41,7 @@ const (
 	voidTestingRepo      = "https://repo.ryoku.dev/stable/void/channels/testing/x86_64"
 	voidRepoConfig       = "/etc/xbps.d/20-ryoku.conf"
 	voidSystemRepo       = "/usr/share/xbps.d/20-ryoku.conf"
+	voidZRepoConfig      = "/etc/xbps.d/25-zrepo.conf"
 	voidTrustedKeyDir    = "/var/db/xbps/keys"
 	fedoraStableRepo     = "https://repo.ryoku.dev/stable/fedora/$releasever/x86_64"
 	fedoraTestingRepo    = "https://repo.ryoku.dev/stable/fedora/$releasever/channels/testing/x86_64"
@@ -1394,10 +1395,57 @@ func stepVoidRepo(e *engine) error {
 		`mv -f /var/lib/ryoku/channel-intent.new /var/lib/ryoku/channel-intent`); err != nil {
 		return err
 	}
+	d := e.d()
+	if d.zrepoURL != "" {
+		if err := registerVoidZRepo(e, d); err != nil {
+			return err
+		}
+	}
 	if writeOverride {
 		return e.sudo("xbps-install", "-S")
 	}
 	return e.sudo("xbps-install", "--repository", repository, "-S")
+}
+
+// registerVoidZRepo wires the third-party z-repo after the Ryoku repository:
+// fetch its key into the trust dir, then write its /etc/xbps.d file, the same
+// key-before-config order the Ryoku repo follows here.
+func registerVoidZRepo(e *engine, d *distro) error {
+	if strings.ContainsAny(d.zrepoURL, "\r\n") ||
+		!filepath.IsAbs(d.zrepoURL) && !strings.Contains(d.zrepoURL, "://") {
+		return fmt.Errorf("invalid z-repo repository %q: expected a URL or absolute path", d.zrepoURL)
+	}
+	if !strings.HasPrefix(d.zrepoKeyURL, "https://") || strings.ContainsAny(d.zrepoKeyURL, " \t\r\n") {
+		return fmt.Errorf("invalid z-repo key URL %q: expected an HTTPS URL", d.zrepoKeyURL)
+	}
+	keyPath := filepath.Join(voidTrustedKeyDir, d.zrepoKeyName+".plist")
+	if err := e.sudo("rm", "-f", keyPath); err != nil {
+		return err
+	}
+	if err := e.sudo("xbps-fetch", "-o", keyPath, d.zrepoKeyURL); err != nil {
+		return err
+	}
+	if err := e.sudoWrite(voidZRepoConfig, "repository="+d.zrepoURL+"\n"); err != nil {
+		return err
+	}
+	if err := e.sudo("chmod", "644", voidZRepoConfig); err != nil {
+		return err
+	}
+	e.say(i18n.Tf("configured the z-repo XBPS repository in %s", voidZRepoConfig))
+	return nil
+}
+
+// The z-repo extras ride along best effort: a missing extra or an unreachable
+// repository must not abort the install.
+func installVoidZRepoExtras(e *engine) error {
+	d := e.d()
+	if len(d.zrepoExtras) == 0 {
+		return nil
+	}
+	if err := e.sudo(d.installArgs(d.zrepoExtras)...); err != nil {
+		e.say(i18n.T("warning: could not install the z-repo extras (continuing)"))
+	}
+	return nil
 }
 
 type fedoraCopr struct {
@@ -1911,7 +1959,13 @@ func stepPackages(e *engine) error {
 		if err != nil {
 			return err
 		}
-		return installPackagePlan(e, d, pkgs)
+		if err := installPackagePlan(e, d, pkgs); err != nil {
+			return err
+		}
+		if d.id == "void" {
+			return installVoidZRepoExtras(e)
+		}
+		return nil
 	}
 	base, err := e.readBasePackages()
 	if err != nil {
@@ -3215,7 +3269,7 @@ func stepVerify(e *engine) error {
 	if e.dry {
 		switch e.d().id {
 		case "void":
-			e.say(i18n.T("DRYRUN: verify Ryoku XBPS repo, trusted key, ryoku-desktop packages, Turnstile, niri session"))
+			e.say(i18n.Tf("DRYRUN: verify Ryoku XBPS repo, trusted key, ryoku-desktop packages, Turnstile, %s session", e.p.compositor))
 		case "fedora":
 			e.say(i18n.T("DRYRUN: verify the Ryoku RPM repo and key, RPM packages, SDDM, and compositor session"))
 		default:

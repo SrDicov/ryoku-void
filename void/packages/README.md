@@ -15,8 +15,9 @@ maintaining a second desktop list.
   Mandrel and installs its runit watcher.
 
 The main lanes are `desktop`, `dev`, `system`, `extra`, `optional`, and the four
-`hardware:*` lanes. The recorded `hyprland` lane is unavailable: Ryoku needs
-Hyprland 0.55+ and GCC 15, while Void ships GCC 14. The table also records
+`hardware:*` lanes. The `hyprland` lane rides the z-repo: Void's toolchain
+cannot build Hyprland 0.55+, so its whole family maps to the same-named
+z-repo packages through `repo=zrepo`. The table also records
 unavailable packages such as asusctl, SteamCMD, Looking Glass, and
 pam-fprint-grosshack, with the reason each one cannot enter the Ryoku repo.
 

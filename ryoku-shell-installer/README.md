@@ -20,9 +20,11 @@ restricted dependency COPRs. Debian remains the source-build path: its package
 manager supplies the runtime and build dependencies, and the installer fetches
 the pinned fonts and cursor theme its archive does not carry.
 
-The Void edition is niri-only because Hyprland needs GCC 15 and Void ships GCC
-14. Wayfire, Zen Browser, LocalSend, Voxtype, asusctl, adw-gtk-theme, and GPU
-passthrough are not available. A conversion keeps the machine's existing
+The Void edition installs its desktop from the Ryoku XBPS repository. Wayfire
+and Zen Browser are not available as choices, and asusctl, adw-gtk-theme, and
+GPU passthrough are not available; the Hyprland lane rides the third-party
+signed z-repo (`docs/void.md`), so Void defaults to Hyprland like the other
+editions. A conversion keeps the machine's existing
 bootloader and snapshot stack; the shell installer provisions neither.
 Snapshot rollback works when the existing root is btrfs with snapper set up,
 and `ryoku doctor` converges the snapper config the same way it does on Arch.

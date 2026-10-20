@@ -62,7 +62,7 @@ installed=/tmp/planned.packages
 # The installer's hardware lane depends on the container's detected GPU, so
 # compare its package transaction with the union of every hardware lane.
 if ! sh /repo/system/packages/resolve --table /repo/void/packages/translations.tsv \
-  --lane desktop --lane hardware:amd --lane hardware:intel \
+  --lane desktop --lane hyprland --lane hardware:amd --lane hardware:intel \
   --lane hardware:nvidia --lane hardware:vm --session > "$resolved"; then
   fail "void package resolver rejected the installer lanes"
 fi
@@ -89,13 +89,13 @@ for package in $packages; do
   printf '%s\n' "$package" >> "$installed"
   case $package in
     # the Ryoku apps are installer choices, on by default, outside the desktop lane
-    ryoku-keyring|ryoku-desktop|ryoku-desktop-niri|ryotunes|ryomanager) ;;
+    ryoku-keyring|ryoku-desktop|ryoku-desktop-hyprland|ryotunes|ryomanager) ;;
     *) grep -Fxq "$package" "$resolved" ||
       fail "XBPS package transaction contains '$package', which the resolver did not return" ;;
   esac
 done
 
-for package in ryoku-keyring ryoku-desktop ryoku-desktop-niri niri quickshell sddm dbus elogind turnstile socklog-void; do
+for package in ryoku-keyring ryoku-desktop ryoku-desktop-hyprland hyprland quickshell sddm dbus elogind turnstile socklog-void; do
   grep -Fxq "$package" "$installed" ||
     fail "XBPS package transaction is missing required package '$package'"
 done
@@ -132,7 +132,7 @@ user_session_line=$(awk '/ryoku-host session ensure --user/ { print NR; exit }' 
   fail "system session provisioning must run before user provisioning"
 grep -Fq 'ryoku-host session fix-wrappers --backup-dir' "$log" ||
   fail "session step did not retain the Turnstile wrapper repair"
-grep -Fq 'verify Ryoku XBPS repo, trusted key, ryoku-desktop packages, Turnstile, niri session' "$log" ||
+grep -Fq 'verify Ryoku XBPS repo, trusted key, ryoku-desktop packages, Turnstile, hyprland session' "$log" ||
   fail "verify step does not cover the packaged Void contract"
 
 if grep -Eq 'DRYRUN:.*[[:space:]](pacman|systemctl)([[:space:]]|$)' "$log"; then

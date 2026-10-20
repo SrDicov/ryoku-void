@@ -236,6 +236,22 @@ func runUninstall(yes, dry bool) int {
 			}
 		}
 	}
+	if activeDistro.id == "void" && activeDistro.zrepoKeyName != "" {
+		paths := []string{}
+		if _, err := os.Stat(voidZRepoConfig); err == nil {
+			paths = append(paths, voidZRepoConfig)
+		}
+		zKey := filepath.Join(voidTrustedKeyDir, activeDistro.zrepoKeyName+".plist")
+		if _, err := os.Stat(zKey); err == nil {
+			paths = append(paths, zKey)
+		}
+		if len(paths) > 0 && confirm(rd, i18n.T("remove the z-repo XBPS repository files and key?"), yes) {
+			args := append([]string{"-n", "rm", "-f"}, paths...)
+			if err := run("sudo", args...); err != nil {
+				fmt.Println(i18n.T("warning: could not remove the z-repo repository files"))
+			}
+		}
+	}
 	if activeDistro.id == "fedora" {
 		paths := []string{fedoraRepoConfigPath()}
 		// ryoku-keyring owns the key file and took it with the packages; only

@@ -6,7 +6,8 @@ import "strings"
 // off until their void-repo-* package is installed. A table row names the
 // repositories its packages need in its notes (repo=nonfree, or a list such as
 // repo=nonfree,multilib when the package and its 32-bit companions live apart).
-// Ryoku's own repo=ryoku is configured by the installer and needs no enabler.
+// Ryoku's own repo=ryoku and the third-party repo=zrepo are configured by the
+// installer and need no enabler.
 var xbpsEnablerPackages = map[string]string{
 	"multilib":         "void-repo-multilib",
 	"nonfree":          "void-repo-nonfree",
