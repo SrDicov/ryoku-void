@@ -8,17 +8,10 @@ package main
 
 import (
 	"bufio"
-	"crypto/md5"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1414,49 +1407,9 @@ func stepVoidRepo(e *engine) error {
 	return e.sudo("xbps-install", "--repository", repository, "-S")
 }
 
-// sshPubkeyFingerprint mirrors xbps lib/pubkey2fp.c: the hex MD5 of the
-// OpenSSH ssh-rsa wire form. xbps prints this fingerprint and names trusted
-// keys after it in /var/db/xbps/keys.
-func sshPubkeyFingerprint(pubPEM []byte) (string, error) {
-	blk, _ := pem.Decode(pubPEM)
-	if blk == nil {
-		return "", errors.New("the z-repo key is not PEM")
-	}
-	pub, err := x509.ParsePKIXPublicKey(blk.Bytes)
-	if err != nil {
-		return "", err
-	}
-	rsaPub, ok := pub.(*rsa.PublicKey)
-	if !ok {
-		return "", errors.New("the z-repo key is not RSA")
-	}
-	// length-prefixed (big-endian, sign byte) SSH buffer, exponent before modulus
-	prefixed := func(b []byte) []byte {
-		pad := 0
-		if b[0]&0x80 != 0 {
-			pad = 1
-		}
-		out := make([]byte, 4+pad+len(b))
-		binary.BigEndian.PutUint32(out, uint32(len(b)+pad))
-		copy(out[4+pad:], b)
-		return out
-	}
-	wire := []byte{0, 0, 0, 7, 's', 's', 'h', '-', 'r', 's', 'a'}
-	wire = append(wire, prefixed(big.NewInt(int64(rsaPub.E)).Bytes())...)
-	wire = append(wire, prefixed(rsaPub.N.Bytes())...)
-	digest := md5.Sum(wire)
-	parts := make([]string, len(digest))
-	for i, b := range digest {
-		parts[i] = fmt.Sprintf("%02x", b)
-	}
-	return strings.Join(parts, ":"), nil
-}
-
-// registerVoidZRepo wires the third-party z-repo after the Ryoku repository.
-// xbps only ever consults /var/db/xbps/keys/<fingerprint>.plist — its
-// interactive key-import prompt needs a TTY, which engine.cmd never gives a
-// child — so the fetched PEM is converted to that plist here, pinned against
-// the fingerprint the distro struct records.
+// registerVoidZRepo wires the third-party z-repo after the Ryoku repository:
+// fetch its key into the trust dir, then write its /etc/xbps.d file, the same
+// key-before-config order the Ryoku repo follows here.
 func registerVoidZRepo(e *engine, d *distro) error {
 	if strings.ContainsAny(d.zrepoURL, "\r\n") ||
 		!filepath.IsAbs(d.zrepoURL) && !strings.Contains(d.zrepoURL, "://") {
@@ -1465,48 +1418,11 @@ func registerVoidZRepo(e *engine, d *distro) error {
 	if !strings.HasPrefix(d.zrepoKeyURL, "https://") || strings.ContainsAny(d.zrepoKeyURL, " \t\r\n") {
 		return fmt.Errorf("invalid z-repo key URL %q: expected an HTTPS URL", d.zrepoKeyURL)
 	}
-	if e.dry {
-		e.say(i18n.Tf("DRYRUN: fetch the z-repo release key into %s", filepath.Join(voidTrustedKeyDir, d.zrepoKeyFP+".plist")))
-		e.say(i18n.Tf("DRYRUN: write %s", voidZRepoConfig))
-		return nil
-	}
-	pubPath := filepath.Join("/tmp", d.zrepoKeyName+".pub")
-	if err := e.sudo("rm", "-f", pubPath); err != nil {
+	keyPath := filepath.Join(voidTrustedKeyDir, d.zrepoKeyName+".plist")
+	if err := e.sudo("rm", "-f", keyPath); err != nil {
 		return err
 	}
-	defer func() { _ = e.sudo("rm", "-f", pubPath) }()
-	if err := e.sudo("xbps-fetch", "-o", pubPath, d.zrepoKeyURL); err != nil {
-		return err
-	}
-	pubPEM, err := sudoReadFile(pubPath)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", pubPath, err)
-	}
-	fingerprint, err := sshPubkeyFingerprint(pubPEM)
-	if err != nil {
-		return err
-	}
-	if fingerprint != d.zrepoKeyFP {
-		return fmt.Errorf(i18n.T("the z-repo key fingerprint is %s; expected %s"), fingerprint, d.zrepoKeyFP)
-	}
-	keyPath := filepath.Join(voidTrustedKeyDir, fingerprint+".plist")
-	plist := `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>fingerprint</key>
-	<string>` + fingerprint + `</string>
-	<key>public-key</key>
-	<data>
-` + base64.StdEncoding.EncodeToString(pubPEM) + `
-	</data>
-</dict>
-</plist>
-`
-	if err := e.sudoWrite(keyPath, plist); err != nil {
-		return err
-	}
-	if err := e.sudo("chmod", "644", keyPath); err != nil {
+	if err := e.sudo("xbps-fetch", "-o", keyPath, d.zrepoKeyURL); err != nil {
 		return err
 	}
 	if err := e.sudoWrite(voidZRepoConfig, "repository="+d.zrepoURL+"\n"); err != nil {

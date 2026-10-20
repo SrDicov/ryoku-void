@@ -35,11 +35,7 @@ type distro struct {
 	zrepoURL     string
 	zrepoKeyURL  string
 	zrepoKeyName string
-	// zrepoKeyFP pins the OpenSSH-style fingerprint xbps prints for the key
-	// served by zrepoKeyURL; it doubles as the trusted-key file name xbps
-	// looks up, and the fetched key must match it or the install stops.
-	zrepoKeyFP  string
-	zrepoExtras []string
+	zrepoExtras  []string
 
 	// build are the extra packages a fromSource install needs to compile the
 	// Go programs, the Ryoku.Blobs QML plugin, and the Hyprland plugins.
@@ -148,7 +144,6 @@ var voidLinux = &distro{
 	zrepoURL:     "https://github.com/SrDicov/z-repo/releases/download/stable",
 	zrepoKeyURL:  "https://raw.githubusercontent.com/SrDicov/z-repo/master/keys/zlinux-repo.pub",
 	zrepoKeyName: "zlinux-repo",
-	zrepoKeyFP:   "02:16:21:e8:80:43:b6:16:d4:63:13:e5:5d:e1:32:b7",
 	zrepoExtras:  []string{"zen-browser-bin"},
 }
 

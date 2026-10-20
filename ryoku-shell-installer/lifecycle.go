@@ -241,7 +241,7 @@ func runUninstall(yes, dry bool) int {
 		if _, err := os.Stat(voidZRepoConfig); err == nil {
 			paths = append(paths, voidZRepoConfig)
 		}
-		zKey := filepath.Join(voidTrustedKeyDir, activeDistro.zrepoKeyFP+".plist")
+		zKey := filepath.Join(voidTrustedKeyDir, activeDistro.zrepoKeyName+".plist")
 		if _, err := os.Stat(zKey); err == nil {
 			paths = append(paths, zKey)
 		}
