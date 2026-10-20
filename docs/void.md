@@ -1,9 +1,9 @@
 # Void Linux port
 
-Ryoku ships an official Void edition: niri, runit, Turnstile, elogind, SDDM,
-and XBPS. The package translation lives in `void/packages/`, the runit init
-under `void/init/`, and the whole lane is described in `void/README.md`. This
-file covers what the z-repo lane adds on top of it.
+Ryoku ships an official Void edition: Hyprland and niri, runit, Turnstile,
+elogind, SDDM, and XBPS. The package translation lives in `void/packages/`,
+the runit init under `void/init/`, and the whole lane is described in
+`void/README.md`. This file covers what the z-repo lane adds on top of it.
 
 ## What upstream ships, and what it does not
 
@@ -89,7 +89,8 @@ Two details are Void specific. Void's `glm` is header only and ships no
 
 ## Services
 
-The Void edition is niri, and its services are runit services under
+The Void edition defaults to Hyprland, which the z-repo serves, and keeps
+niri as the alternative. Its services are runit services under
 `void/init/`: system services are links in `/var/service` pointing at
 `/etc/sv/<name>`, and the user session services are links under
 `~/.config/service`. The installer reaches both through `ryoku-host`, so no
