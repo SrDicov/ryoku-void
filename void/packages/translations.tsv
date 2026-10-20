@@ -6,7 +6,7 @@ alsa-utils	alsa-utils	desktop
 amd-ucode	linux-firmware-amd	hardware:amd	
 android-tools	android-tools	optional	
 apple_cursor	apple_cursor	extra	repo=ryoku
-asusctl	-	optional	No faithful runit shutdown integration is available.
+asusctl	asusctl	optional	repo=zrepo
 avahi	avahi	optional	
 base	base-system	system	
 base-devel	base-devel	system	
