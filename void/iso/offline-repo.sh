@@ -83,7 +83,7 @@ repositories=(
 # offline repository, so the installer can install the Hyprland desktop from
 # the image; their signatures verify against the committed z-repo key.
 mapfile -t zrepo_packages < <(
-	awk -F'\t' '$3 ~ "hyprland" && $4 == "repo=zrepo" { print $2 }' \
+	awk -F'\t' '$4 == "repo=zrepo" { print $2 }' \
 		"$REPO_ROOT/void/packages/translations.tsv"
 )
 if ((${#zrepo_packages[@]})); then
