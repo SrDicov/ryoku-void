@@ -133,7 +133,8 @@ if ((${#zrepo_packages[@]})); then
 			[[ -n $dep ]] || continue
 			need=${dep%%[<>=]*}
 			[[ -n $need && $need != "$name" ]] || continue
-			zrepo_asset_url "$need" >/dev/null || continue
+			dep_url=$(zrepo_asset_url "$need")
+			[[ -n $dep_url ]] || continue
 			queue+=("$need")
 		done < <(xbps-query --repository="$zrepo_work" -R -p run_depends "$name" 2>/dev/null)
 	done
