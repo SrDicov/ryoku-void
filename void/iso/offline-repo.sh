@@ -15,12 +15,13 @@ VERIFY_ROOT=${RYOKU_VOID_ISO_VERIFY_ROOT:-$WORK}
 KEYS_OUT=${RYOKU_VOID_ISO_KEYS_OUT:-$DEST/.keys}
 RYOKU_REPO=${RYOKU_VOID_ISO_RYOKU_REPO:-}
 VOID_MIRROR=${RYOKU_VOID_ISO_MIRROR:-https://repo-default.voidlinux.org/current}
+ZREPO_RELEASE=${RYOKU_VOID_ISO_ZREPO:-https://api.github.com/repos/SrDicov/z-repo/releases/tags/stable}
 RESOLVE=$REPO_ROOT/system/packages/resolve
 
 log() { printf '\033[1;35m::\033[0m %s\n' "$*"; }
 die() { printf 'offline-repo.sh: error: %s\n' "$*" >&2; exit 1; }
 
-for command in xbps-install xbps-rindex awk du; do
+for command in xbps-install xbps-rindex awk du curl; do
 	command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
 done
 [[ -x $RESOLVE ]] || die "package resolver not found: $RESOLVE"
@@ -63,21 +64,12 @@ seed_keys() {
 	fi
 }
 
-# Remote repositories need their trust key before the first index sync.
-if [[ -d $RYOKU_REPO && -z ${RYOKU_VOID_ISO_KEYRING_DIR:-} ]]; then
-	key_root=$WORK/key-root
-	mkdir -p "$key_root/var/db/xbps/keys"
-	if ! XBPS_ARCH=$ARCH xbps-install -r "$key_root" -i -R "$RYOKU_REPO" -Sy ryoku-keyring; then
-		die "could not extract ryoku-keyring from $RYOKU_REPO; set RYOKU_VOID_ISO_KEYRING_DIR"
-	fi
-	compgen -G "$key_root/var/db/xbps/keys/*.plist" >/dev/null \
-		|| die "ryoku-keyring installed no XBPS key plist"
-	cp -a "$key_root"/var/db/xbps/keys/*.plist "$KEYS_OUT/"
-elif [[ -n ${RYOKU_VOID_ISO_KEYRING_DIR:-} ]]; then
-	cp -a "$RYOKU_VOID_ISO_KEYRING_DIR"/*.plist "$KEYS_OUT/"
-else
-	die "a remote Ryoku repository requires RYOKU_VOID_ISO_KEYRING_DIR"
-fi
+# Trust anchors for every merged repository: the committed Ryoku keyring
+# covers the upstream [ryoku] repository and the z-repo Hyprland lane.
+RYOKU_KEYRING=${RYOKU_VOID_ISO_KEYRING_DIR:-$REPO_ROOT/void/packages/srcpkgs/ryoku-keyring/files}
+compgen -G "$RYOKU_KEYRING"/*.plist >/dev/null \
+	|| die "no XBPS key plists in $RYOKU_KEYRING"
+cp -a "$RYOKU_KEYRING"/*.plist "$KEYS_OUT/"
 
 repositories=(
 	-R "$VOID_MIRROR"
@@ -87,12 +79,54 @@ repositories=(
 	-R "$RYOKU_REPO"
 )
 
+# The Hyprland lane rides the third-party z-repo. Its packages bake into the
+# offline repository, so the installer can install the Hyprland desktop from
+# the image; their signatures verify against the committed z-repo key.
+mapfile -t zrepo_packages < <(
+	awk -F'\t' '$3 ~ "hyprland" && $4 == "repo=zrepo" { print $2 }' \
+		"$REPO_ROOT/void/packages/translations.tsv"
+)
+if ((${#zrepo_packages[@]})); then
+	log "Fetching the Hyprland z-repo lane (${#zrepo_packages[@]} packages)"
+	zrepo_work=$WORK/zrepo
+	mkdir -p "$zrepo_work"
+	assets=$(mktemp "$WORK/z-repo-assets.XXXXXX") \
+		|| die "z-repo release asset list could not be written"
+	curl -fsSL --retry 3 \
+		-H 'Accept: application/vnd.github+json' \
+		"$ZREPO_RELEASE" > "$assets"
+	[[ -s $assets ]] || die "z-repo release at $ZREPO_RELEASE returned no asset list"
+	for name in "${zrepo_packages[@]}"; do
+		url=$(awk -v pkg="$name" '
+			{
+				if (match($0, /"browser_download_url"[[:space:]]*:[[:space:]]*"/)) {
+					start = RSTART + RLENGTH
+					quote = index(substr($0, start), "\"") + start - 1
+					url = substr($0, start, quote - start)
+					base = url
+					sub(/.*\//, "", base)
+					if (index(base, pkg "-") == 1 && base ~ /\.xbps$/) {
+						print url
+						exit
+					}
+				}
+			}' "$assets")
+		[[ -n $url ]] || die "z-repo release has no $name package archive"
+		curl -fsSL --retry 3 -o "$zrepo_work/${url##*/}" "$url"
+		curl -fsSL --retry 3 -o "$zrepo_work/${url##*/}.sig2" "$url.sig2"
+	done
+	rm -f "$assets"
+	XBPS_TARGET_ARCH=$ARCH xbps-rindex --add "$zrepo_work"/*.xbps
+	repositories+=(-R "$zrepo_work")
+fi
+
 mapfile -t target_packages < <(
 	"$RESOLVE" \
 		--table "$REPO_ROOT/void/packages/translations.tsv" \
 		--lane system \
 		--lane desktop \
 		--lane dev \
+		--lane hyprland \
 		--lane hardware:amd \
 		--lane hardware:intel \
 		--lane hardware:nvidia \
@@ -154,6 +188,12 @@ if [[ -d $RYOKU_REPO ]]; then
 	local_archives=("$RYOKU_REPO"/*.xbps)
 	((${#local_archives[@]})) || die "local Ryoku repository has no package archives"
 	link_or_copy_files "${local_files[@]}"
+fi
+
+if ((${#zrepo_packages[@]})); then
+	zrepo_files=("$zrepo_work"/*.xbps "$zrepo_work"/*.xbps.sig2)
+	((${#zrepo_files[@]})) || die "z-repo lane fetched no package archives"
+	link_or_copy_files "${zrepo_files[@]}"
 fi
 
 packages=("$DEST"/*.xbps)

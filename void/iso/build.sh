@@ -184,6 +184,7 @@ run=("$CONTAINER_ENGINE" run --rm --platform linux/amd64 --privileged
 	-w /work
 	-e "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
 	-e "RYOKU_VOID_MKLIVE_REF=$MKLIVE_REF"
+	-e "RYOKU_VOID_ISO_ZREPO=${RYOKU_VOID_ISO_ZREPO:-}"
 	-e RYOKU_VOID_ISO_KEYS_OUT=/spool/keys
 	-e RYOKU_VOID_ISO_OFFLINE_WORK=/spool/offline-work
 	-e RYOKU_ISO_ROOT_REPO=/spool/offline-repo

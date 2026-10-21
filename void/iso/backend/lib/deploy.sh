@@ -2,6 +2,11 @@
 
 void_desktop_install() {
   local -a args=(--lane desktop --lane dev)
+  # Only the picked compositor's own lane joins the plan; the other one stays
+  # out of the desktop package list.
+  case $RYOKU_COMPOSITOR in
+    hyprland) args+=(--lane hyprland) ;;
+  esac
   local lane
   while IFS= read -r lane; do args+=(--lane "$lane"); done < <(ryoku_profile_lanes)
   local -a drop_args=()

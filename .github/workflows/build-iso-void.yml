@@ -14,6 +14,11 @@ on:
         required: false
         default: 'https://repo.ryoku.dev/stable/void/x86_64'
         type: string
+      publish:
+        description: 'Publish (GPG sign + R2 upload); requires the release secrets'
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - 'void-v*'
@@ -82,6 +87,7 @@ jobs:
             echo "RYOKU_ISO_PUBLIC_BASE=https://iso.ryoku.dev/stable"
           } >> "$GITHUB_ENV"
       - name: Verify release secrets
+        if: github.event_name == 'push' || inputs.publish == true
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           VOID_REPO_SIGNING_KEY: ${{ secrets.VOID_REPO_SIGNING_KEY }}
@@ -99,6 +105,7 @@ jobs:
           [[ -n $R2_ENDPOINT ]] || missing+=(R2_ENDPOINT)
           ((${#missing[@]} == 0)) || { printf 'Missing required secrets: %s\n' "${missing[*]}" >&2; exit 1; }
       - name: Verify the XBPS trust key
+        if: github.event_name == 'push' || inputs.publish == true
         env:
           VOID_REPO_SIGNING_KEY: ${{ secrets.VOID_REPO_SIGNING_KEY }}
           XBPS_PASSPHRASE: ${{ secrets.VOID_REPO_SIGNING_PASSPHRASE }}
@@ -192,12 +199,30 @@ jobs:
           sudo mount -o loop,ro "$iso" "$iso_mount"
           [[ -s $iso_mount/ryoku/repo/x86_64-repodata ]]
           compgen -G "$iso_mount/ryoku/repo/*.xbps" >/dev/null
+          # The Hyprland lane must ride the baked repository: every z-repo
+          # package of the lane is present and described by the index.
+          for package in hypr-dynamic-cursors hyprglass hyprgrass hyprland \
+            hyprland-preview-share-picker hyprpolkitagent hyprsunset \
+            imgborders ryoku-desktop-hyprland ryoku-hypr-plugins \
+            ryoku-keysounds xdg-desktop-portal-hyprland; do
+            compgen -G "$iso_mount/ryoku/repo/$package-*.x86_64.xbps" >/dev/null || {
+              echo "::error::the baked repository lacks $package"
+              exit 1
+            }
+          done
           sudo mount -o loop,ro "$iso_mount/LiveOS/squashfs.img" "$squash_mount"
           sudo mount -o loop,ro "$squash_mount/LiveOS/rootfs.img" "$root_mount"
           stamp=$root_mount/usr/share/ryoku/.payload
           [[ -s $stamp ]]
           [[ $(awk -F= '$1=="commit" { print $2; exit }' "$stamp") == "$GITHUB_SHA" ]]
           [[ $(cat "$root_mount/usr/share/ryoku/variant") == void ]]
+          for key in '02:16:21:e8:80:43:b6:16:d4:63:13:e5:5d:e1:32:b7' \
+            'd1:93:22:ea:fc:f3:28:2b:70:0a:14:63:9e:b4:f3:85'; do
+            [[ -s "$root_mount/var/db/xbps/keys/$key.plist" ]] || {
+              echo "::error::the live root misses the $key trust key"
+              exit 1
+            }
+          done
           sudo rsync -aH --numeric-ids "$root_mount/" "$scan_root/"
           sudo chmod -R u+rwX,go+rX "$scan_root"
       - name: Scan live root
@@ -239,6 +264,7 @@ jobs:
           [[ -z ${VOID_ISO_MOUNT:-} ]] || sudo umount "$VOID_ISO_MOUNT"
           [[ -z ${VOID_SCAN_ROOT:-} ]] || sudo rm -rf "$VOID_SCAN_ROOT"
       - name: Sign ISO
+        if: github.event_name == 'push' || inputs.publish == true
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
@@ -268,6 +294,7 @@ jobs:
       - name: Install rclone
         run: curl -fsSL https://rclone.org/install.sh | sudo bash
       - name: Upload to Cloudflare R2
+        if: github.event_name == 'push' || inputs.publish == true
         env:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
