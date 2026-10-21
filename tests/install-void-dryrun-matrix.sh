@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The gate compares English literals; the Void edition translates its output.
+export LC_ALL=C
+
 here=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=tests/install-dryrun-harness.sh
 source "$here/install-dryrun-harness.sh"
