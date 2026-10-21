@@ -143,14 +143,28 @@ mapfile -t target_packages < <(printf '%s\n' "${target_packages[@]}" | LC_ALL=C 
 fetch_closure() {
 	local name=$1
 	shift
-	local root=$WORK/root-$name
-	rm -rf "$root"
-	mkdir -p "$root"
-	seed_keys "$root"
-	log "Downloading $name closure ($# requested packages)"
-	XBPS_ARCH=$ARCH xbps-install \
-		-r "$root" -c "$WORK/cache" -i -S -D -y \
-		"${repositories[@]}" "$@"
+	local root=$WORK/root-$name attempt
+	# ponytail: repo-default is not a snapshot and rotates between resolve and
+	# download; the retry re-resolves against the live index, cheap because
+	# $WORK/cache keeps every successfully downloaded .xbps. Five tries, 10 s
+	# apart; escalate to SNAPSHOT_MIRROR=$VOID_MIRROR/@<date> only if this races.
+	for attempt in 1 2 3 4 5; do
+		rm -rf "$root"
+		mkdir -p "$root"
+		seed_keys "$root"
+		log "Downloading $name closure ($# requested packages), attempt $attempt"
+		if XBPS_ARCH=$ARCH xbps-install \
+			-r "$root" -c "$WORK/cache" -i -S -D -y \
+			"${repositories[@]}" "$@"
+		then
+			return 0
+		fi
+		if ((attempt == 5)); then
+			die "$name closure download failed after 5 attempts; last xbps-install error above"
+		fi
+		log "$name closure attempt $attempt failed: the Void mirror rotates package versions between resolve and download; retrying with a fresh resolve"
+		sleep 10
+	done
 }
 
 fetch_closure target "${target_packages[@]}"
