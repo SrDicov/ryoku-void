@@ -66,5 +66,25 @@ for variant in ryoku-desktop-hyprland ryoku-desktop-niri ryoku-desktop-wayfire; 
   grep -qF -- "$variant" <<<"$bake" \
     || fail "compositor variant '$variant' is not baked into the offline repo"
 done
+# 6. every package the offline desktop-set install can name must be in the bake's
+#    completeness check, not only in its download list: the download staged
+#    ryotunes out of the repo unnoticed and the ISO died at "configure". The
+#    fresh-install apps come from deploy.sh; the file managers from choices.tsv.
+required=$(sed -n '/^for req in/,/; do$/p' "$repo")
+deploy="$root/installation/backend/lib/deploy.sh"
+apps=$(sed -n 's/^[[:space:]]*for package in \(.*\); do$/\1/p' "$deploy" | grep -v '\$' | head -n1)
+[[ -n $apps ]] || fail "could not find the fresh-install app loop in deploy.sh"
+for pkg in $apps; do
+  grep -qwF -- "$pkg" <<<"$required" \
+    || fail "deploy.sh installs '$pkg' with the desktop set, but the offline bake never checks it is in the repo"
+done
+# shellcheck disable=SC2016
+grep -qF '"${file_managers[@]}"' <<<"$required" \
+  || fail "the offered file managers are not in the offline bake's completeness check"
+# 7. a package whose file names its version without the epoch (ryotunes) must
+#    still be staged: the RESOLVED keys carry the epochless version too.
+# shellcheck disable=SC2016
+grep -qF 'RESOLVED["$name ${ver#*:}"]=1' "$repo" \
+  || fail "offline-repo.sh no longer matches epochless package filenames; ryotunes would be dropped from the repo"
 
 echo "offline-repo-integrity: OK"

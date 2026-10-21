@@ -17,6 +17,29 @@
   headless one exits at once.
 
 ### Fixed
+- `power/ryoku-power-cutover`: **updates recover a niri-session environment
+  without reviving its previous compositor socket.** If no process retained
+  `WAYLAND_DISPLAY`, the bind failed even though the sole graphical session's
+  user manager still held it. The manager display is now accepted only for one
+  unambiguous Ryoku session, and its opaque handles are discarded before
+  services restart. The niri provider also replaces a dead inherited
+  `NIRI_SOCKET` with the live socket for that Wayland display. Covered by
+  `tests/power-cutover.sh` and `ryoku/wm/niri/session_environment_test.go`.
+- `drivers/nvidia.sh`: **pre-Turing NVIDIA cards get their driver at install.**
+  The target already carries `nvidia-utils` (hardware.packages lays it, and
+  CachyOS's hyprland, steam, and proton builds depend on it), and the 580xx and
+  470xx utils conflict with it without replacing it. Under `--noconfirm` pacman
+  answers that conflict "no", so the driver transaction failed and Maxwell,
+  Pascal, Volta, and Kepler cards stayed on nouveau. The legacy branches now
+  remove the Turing+ userspace with `-Rdd` first (the legacy utils provide both
+  names) and put it back if the install fails. Covered by
+  `tests/nvidia-driver-selection.sh`.
+- `gpu/ryoku-gpu-lib32`: **a pre-Turing NVIDIA card gets its own 32-bit
+  userspace.** It asked for `lib32-nvidia-utils` on every NVIDIA box, which
+  pacman resolves to the Turing+ package even when a legacy branch provides the
+  name, so the Gaming bundle's driver step conflicted with `nvidia-580xx-utils`
+  or `nvidia-470xx-utils` and failed. It now asks for the `lib32-` half of
+  whichever package owns `nvidia-utils`. Covered by `tests/gpu-lib32.sh`.
 - `gpu/ryoku-gpu-lib32`: **installs on every edition, and as root.** It
   asks `ryoku-host pkg status` which of the wanted 32-bit driver packages the
   edition provides and installs only those, turning on Void's multilib

@@ -68,6 +68,29 @@
   terminal once (`scripts/ryoku-session-intro`).
 
 ### Fixed
+- **Tansu shows each notification once, and Nomarchy and Tansu keep their
+  sound.** Tansu's phone alerts now replace the shell's banners instead of
+  doubling them. Owning the banners also used to silence the arrival cue, but
+  only the Python style plays a sound of its own, so the shell's cue now stands
+  down only there (`quickshell/shell/services/{Config,Notifs}.qml`).
+- **Ryogami deletes the wallpaper its card identifies.** Delete now keeps the
+  catalogue row when removing the source fails, reports that failure in the
+  picker, and is not offered for Wallpaper Engine scenes managed by Steam
+  Workshop. Subfolder wallpapers use their catalogue key for delete and
+  favourites (`ryogami/{daemon,picker}/`).
+- **Folder accents and KDE app palettes now update completely.** The generated
+  `ryoku-folders` theme carries Papirus's plain-directory aliases so Dolphin no
+  longer falls back to blue folders, and running KDE apps receive the palette
+  change after `kdeglobals` is merged without a dangling named colour scheme
+  (`scripts/ryoku-cmd-folders`, `ipc/matugen.go`).
+- **Notifications stay in the panel, and the bars move for quiet sounds too.**
+  A notification used to leave the history as soon as its sender's timeout ran
+  out, and one that never expires was never listed, so the Orpheus card often
+  read empty. The timeout now only times the popup; the panel keeps the newest
+  100 until they are dismissed. The shared spectrum feed was tuned on loud
+  music, so videos, games and anything at lower volume barely moved the drops;
+  a slow peak follower now lifts quiet sources while loud ones keep their real
+  dynamics (`quickshell/shell/services/{Notifs,AudioBars}.qml`).
 - **Nomarchy's package probes and power commands work on Void.**
   `omarchy-pkg-present` and `omarchy-pkg-missing` asked pacman on every edition
   but Fedora, so on Void every package read as missing; they now ask

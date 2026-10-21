@@ -58,6 +58,15 @@ exec "$@"
 EOF
 chmod +x "$fakebin/sudo"
 
+# -Qq answers a provided name with the providing package, as pacman does; with
+# no owner set, nvidia-utils is not installed at all.
+cat >"$fakebin/pacman" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = -Qq ] && [ "${2:-}" = nvidia-utils ] && [ -n "${RYOKU_TEST_NVIDIA_UTILS:-}" ] || exit 1
+printf '%s\n' "$RYOKU_TEST_NVIDIA_UTILS"
+EOF
+chmod +x "$fakebin/pacman"
+
 mk_card() { # <drm-root> <cardN> <driver>
   local d="$1/$2/device"
   mkdir -p "$d"
@@ -87,6 +96,15 @@ grep -qx 'lib32-vulkan-intel' <<<"$(packages_for "$root")" \
 root="$tmp/nvidia"; mk_card "$root" card0 nvidia
 grep -qx 'lib32-nvidia-utils' <<<"$(packages_for "$root")" \
   || fail "nvidia: missing NVIDIA userspace"
+
+# A pre-Turing card runs a legacy branch whose utils provide nvidia-utils: the
+# helper asks for that branch's 32-bit half, never the conflicting Turing+ one.
+root="$tmp/nvidia-legacy"; mk_card "$root" card0 nvidia
+out="$(RYOKU_TEST_NVIDIA_UTILS=nvidia-580xx-utils packages_for "$root")"
+grep -qx 'lib32-nvidia-580xx-utils' <<<"$out" || fail "legacy nvidia: missing the branch's 32-bit userspace"
+grep -qx 'lib32-nvidia-utils' <<<"$out" && fail "legacy nvidia: requested the conflicting Turing+ userspace"
+out="$(RYOKU_TEST_NVIDIA_UTILS=nvidia-utils packages_for "$root")"
+grep -qx 'lib32-nvidia-utils' <<<"$out" || fail "turing nvidia: missing NVIDIA userspace"
 
 root="$tmp/hybrid"; mk_card "$root" card0 i915; mk_card "$root" card1 nvidia
 out="$(packages_for "$root")"

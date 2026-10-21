@@ -88,6 +88,17 @@ gpu_drivers() {
   done
 }
 
+# The 32-bit half of whichever NVIDIA userspace is installed. A pre-Turing card
+# runs a legacy branch whose utils (nvidia-580xx-utils) provide nvidia-utils by
+# name, yet pacman resolves lib32-nvidia-utils to the real Turing+ package, which
+# conflicts with that branch and fails the transaction under --noconfirm.
+# `pacman -Qq` answers a provided name with the package that provides it.
+nvidia_lib32() {
+  local owner
+  owner=$(pacman -Qq nvidia-utils 2>/dev/null) || owner=nvidia-utils
+  printf 'lib32-%s\n' "$owner"
+}
+
 main() {
   if [[ $RYOKU_DRYRUN == 1 ]] || [[ "$(ryoku-host pkgmgr)" == pacman ]]; then
     ensure_multilib
@@ -101,7 +112,7 @@ main() {
     case "$driver" in
       amdgpu | radeon) pkgs+=(lib32-vulkan-radeon);  seen_vendor=1 ;;
       i915 | xe)       pkgs+=(lib32-vulkan-intel);   seen_vendor=1 ;;
-      nvidia)          pkgs+=(lib32-nvidia-utils);   seen_vendor=1 ;;
+      nvidia)          pkgs+=("$(nvidia_lib32)");    seen_vendor=1 ;;
       nouveau)         pkgs+=(lib32-vulkan-nouveau); seen_vendor=1 ;;
     esac
   done < <(gpu_drivers)

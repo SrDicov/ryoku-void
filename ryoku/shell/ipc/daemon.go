@@ -1594,7 +1594,7 @@ func (d *daemon) dispatch(line string) string {
 		if args[1] != "light" && args[1] != "dark" {
 			return "err gtk: mode must be light or dark"
 		}
-		matugenReload(args[1])
+		matugenReload(args[1], d.kdePaletteEmitter())
 		return "ok"
 	case "reload":
 		return d.reload()

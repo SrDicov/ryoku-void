@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### Fixed
+- **The offline install no longer dies at "configure" on the desktop set.**
+  `offline-repo.sh` staged a cached package only when its filename matched the
+  version pacman resolved, and `ryotunes` resolves to `1:1.2.3-1` from a file
+  named without the epoch, so the bake dropped it. The installer still asked for
+  it with `ryoku-desktop`, and the whole transaction failed with no network to
+  recover. Dolphin and Thunar, offered as file managers, were never baked at
+  all. The bake now matches the epochless version too, bakes every file
+  manager `choices.tsv` offers, and fails the build when `ryotunes`,
+  `ryomanager`, or a file manager is missing from the repo. Covered by
+  `tests/offline-repo-integrity.sh`.
 - **The CachyOS ISO bakes CachyOS's own builds.** `offline-repo.sh` listed
   Arch's core, extra and multilib above the generic `[cachyos]` repo, so the
   closure took Arch's build of everything CachyOS forks (pacman, mesa,

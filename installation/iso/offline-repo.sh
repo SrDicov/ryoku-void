@@ -49,6 +49,14 @@ read_section() {
 pkgdir="$REPO_ROOT/system/packages"
 hw="$pkgdir/hardware.packages"
 
+# Every file manager the TUI offers, from the manifest it reads them from:
+# deploy.sh installs the chosen one with the desktop set, and offline that
+# transaction sees only this repo.
+mapfile -t file_managers < <(awk -F'\t' '
+  $1 == "choice" && $2 == "file-manager" && $5 != "-" { gsub(",", "\n", $5); print $5 }
+' "$REPO_ROOT/installation/installerplan/choices.tsv")
+(( ${#file_managers[@]} )) || die "no file-manager choices in installation/installerplan/choices.tsv"
+
 # The base.packages and aur.packages names the CachyOS layer replaces (the stock
 # kernel, the AUR's yay-bin): a CachyOS install never carries them
 # (lib/cachyos.sh drops them), so neither does its closure.
@@ -93,7 +101,7 @@ mapfile -t PKGS < <(
   # network to fetch a missing variant. The fresh-install apps bake beside
   # ryoku-rashin. The optional CachyOS layer remains network-only on plain.
   printf '%s\n' ryoku-keyring ryoku-desktop ryoku-desktop-hyprland ryoku-desktop-niri ryoku-desktop-wayfire asusctl \
-    ryoku-rashin ryotunes ryomanager
+    ryoku-rashin ryotunes ryomanager "${file_managers[@]}"
 )
 # dedupe, keep order.
 mapfile -t PKGS < <(printf '%s\n' "${PKGS[@]}" | without_replaced | awk '!seen[$0]++')
@@ -159,6 +167,10 @@ read_served() {
     [[ -n ${SERVED[$name]:-} ]] && continue
     SERVED[$name]=$ver
     RESOLVED["$name $ver"]=1
+    # A package file names its version without the epoch when the repo that
+    # publishes it does (ryotunes is 1:1.2.3-1 in a ryotunes-1.2.3-1 file), and
+    # stage_offline_repo matches by filename, so it dropped ryotunes unnoticed.
+    RESOLVED["$name ${ver#*:}"]=1
   done < <("${PAC[@]}" -Sl --config "$conf" --dbpath "$work/db")
 }
 read_served
@@ -528,7 +540,7 @@ mapfile -t aur_expected < <(read_list "$pkgdir/aur.packages" | without_replaced)
 for req in "${nv_required[@]}" "${nv_legacy_fetch[@]}" nvidia-utils libva-nvidia-driver \
            mesa vulkan-radeon vulkan-intel vulkan-icd-loader \
            ryoku-keyring ryoku-desktop ryoku-desktop-hyprland ryoku-desktop-niri \
-           ryoku-desktop-wayfire ryoku-rashin \
+           ryoku-desktop-wayfire ryoku-rashin ryotunes ryomanager "${file_managers[@]}" \
            "${aur_expected[@]}"; do
   repo_has_pkg "$req" || missing+=("$req")
 done
@@ -583,7 +595,8 @@ EOF
     # an unqualified ryoku-desktop with several providers in the repo makes
     # pacman prompt for a choice, which a build script cannot answer.
     printf '%s\n' amd-ucode intel-ucode ryoku-keyring ryoku-desktop \
-      ryoku-desktop-hyprland ryoku-desktop-niri ryoku-desktop-wayfire ryoku-rashin
+      ryoku-desktop-hyprland ryoku-desktop-niri ryoku-desktop-wayfire ryoku-rashin \
+      ryotunes ryomanager "${file_managers[@]}"
   } | without_replaced | awk '!seen[$0]++' )
 
   local resolved

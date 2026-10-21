@@ -769,6 +769,49 @@ session_environment_path() {
   printf '%s/ryoku-session.%s.environment\n' "${XDG_RUNTIME_DIR:-/tmp}" "$1"
 }
 
+# The user manager can be the only surviving publisher on niri-session: the
+# compositor itself starts before WAYLAND_DISPLAY exists and the login1 scope
+# never receives it. The manager belongs to the whole user, so use its display
+# only when login1 proves there is exactly one graphical Ryoku session. Opaque
+# provider handles are deliberately omitted; they may name a dead compositor
+# instance and bind_user_environment clears them before services restart.
+discover_session_environment_from_manager() {
+  local sid=$1 session_type=$2 provider=$3 path=$4
+  local listing entry key value tmp
+  local -a keys=(
+    XDG_SESSION_ID XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP
+    XDG_SEAT XDG_VTNR WAYLAND_DISPLAY DISPLAY
+  )
+  local -A found=()
+  [[ $init_system == systemd && $session_type == wayland ]] || return 1
+  single_user_session "$sid" || return 1
+  listing="$(systemctl --user show-environment 2>/dev/null)" || return 1
+  while IFS= read -r entry; do
+    key=${entry%%=*}
+    value=${entry#*=}
+    case "$key" in
+      XDG_SESSION_ID|XDG_SESSION_TYPE|XDG_CURRENT_DESKTOP|XDG_SESSION_DESKTOP|\
+      XDG_SEAT|XDG_VTNR|WAYLAND_DISPLAY|DISPLAY)
+        found[$key]=$value
+        ;;
+    esac
+  done <<<"$listing"
+  [[ -n ${found[WAYLAND_DISPLAY]:-} ]] || return 1
+  found[XDG_SESSION_ID]=$sid
+  found[XDG_SESSION_TYPE]=$session_type
+  found[XDG_CURRENT_DESKTOP]=$provider
+  found[XDG_SESSION_DESKTOP]=$provider
+  tmp="$path.$$"
+  (
+    umask 077
+    for key in "${keys[@]}"; do
+      [[ -v found[$key] ]] && printf '%s=%s\0' "$key" "${found[$key]}"
+    done
+    printf 'RYOKU_WM=%s\0' "$provider"
+  ) >"$tmp"
+  mv -f "$tmp" "$path"
+}
+
 # Resolve compositor IPC from a process inside the selected login1 scope rather
 # than from the shared user manager, whose environment may name another
 # same-UID session after a switch.
@@ -801,11 +844,12 @@ discover_session_environment() {
   # the user manager (niri.service, ryoku-shell.service), so the login1 scope
   # holds only sddm-helper, the login shell, niri-session and the
   # `systemctl --user start` that launched it -- none carrying WAYLAND_DISPLAY.
-  # When the scope yields no Wayland client, resolve from the user's own
-  # processes instead. Hyprland keeps its compositor in the scope, matches
-  # above, and never reaches this fallback.
+  # Prefer a matching user process. If none retains the display, the manager is
+  # safe only while this is the user's sole graphical Ryoku session.
   discover_session_environment_from_user \
-    "$sid" "$session_type" "$provider" "$provider_bin" "$path"
+    "$sid" "$session_type" "$provider" "$provider_bin" "$path" ||
+    discover_session_environment_from_manager \
+      "$sid" "$session_type" "$provider" "$path"
 }
 
 # Inspect one process and, when it is a Wayland client of the requested login1

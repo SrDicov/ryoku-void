@@ -507,6 +507,15 @@ if [[ $name == systemctl && ${1:-} == --user && ${2:-} == stop ]]; then
       ;;
   esac
 fi
+if [[ $name == systemctl && ${1:-} == --user &&
+      ${2:-} == show-environment ]]; then
+  [[ ${MANAGER_ENVIRONMENT:-0} == 1 ]] || exit 1
+  printf '%s\n' \
+    'XDG_CURRENT_DESKTOP=testwm' \
+    'WAYLAND_DISPLAY=wayland-manager' \
+    'TESTWM_SOCKET=stale-session'
+  exit 0
+fi
 if [[ $name == systemctl && ${1:-} == show && ${2:-} == test.scope ]]; then
   printf '/test.scope\n'
   exit 0
@@ -1016,6 +1025,40 @@ if EXTRA_SESSION=1 PATH="$tmp/bin:$PATH" \
 fi
 [[ ! -e $tmp/runtime-user/ryoku-session.9.environment ]] \
   || fail "an ambiguous attribution still wrote the session environment"
+
+# niri-session can leave WAYLAND_DISPLAY only in the user manager: niri itself
+# started before the variable existed and the login1 scope contains no clients.
+# A single graphical session makes the manager display attributable, but its
+# opaque compositor handle may be stale and must never be republished.
+printf 'XDG_CURRENT_DESKTOP=testwm\0TESTWM_SOCKET=stale-session\0' \
+  >"$tmp/proc/90001/environ"
+rm -f "$tmp/runtime-user/ryoku-session.9.environment"
+if ! ONLY_SESSION_NINE=1 EXTRA_SESSION=1 MANAGER_ENVIRONMENT=1 \
+    PATH="$tmp/bin:$PATH" CUTOVER_LOG="$tmp/calls" CUTOVER_STATE="$tmp/state" \
+    XDG_RUNTIME_DIR="$tmp/runtime-user" RYOKU_PROC_ROOT="$tmp/proc" \
+    RYOKU_CGROUP_ROOT="$tmp/empty-cgroup" RYOKU_CUTOVER_PROVIDER_ROOT="$tmp/bin" \
+    bash -c 'source "$1"; discover_session_environment 9' _ "$helper"; then
+  fail "the user-manager display did not recover a niri-session login"
+fi
+envmap=$(tr '\0' '\n' <"$tmp/runtime-user/ryoku-session.9.environment")
+grep -qx 'XDG_SESSION_ID=9' <<<"$envmap" \
+  || fail "the manager fallback named the wrong login1 session"
+grep -qx 'WAYLAND_DISPLAY=wayland-manager' <<<"$envmap" \
+  || fail "the manager fallback lost the compositor display"
+grep -qx 'RYOKU_WM=testwm' <<<"$envmap" \
+  || fail "the manager fallback lost the window-manager tag"
+if grep -q '^TESTWM_SOCKET=' <<<"$envmap"; then
+  fail "the manager fallback republished a stale compositor handle"
+fi
+rm -f "$tmp/runtime-user/ryoku-session.9.environment"
+if EXTRA_SESSION=1 MANAGER_ENVIRONMENT=1 PATH="$tmp/bin:$PATH" \
+    XDG_RUNTIME_DIR="$tmp/runtime-user" RYOKU_PROC_ROOT="$tmp/proc" \
+    RYOKU_CGROUP_ROOT="$tmp/empty-cgroup" RYOKU_CUTOVER_PROVIDER_ROOT="$tmp/bin" \
+    bash -c 'source "$1"; discover_session_environment 9' _ "$helper"; then
+  fail "the manager fallback crossed two open graphical sessions"
+fi
+[[ ! -e $tmp/runtime-user/ryoku-session.9.environment ]] \
+  || fail "an ambiguous manager fallback wrote the session environment"
 
 # Xwayland is lazy: it appears with the first X client, so a compositor child
 # snapshotted before that moment carries WAYLAND_DISPLAY but no DISPLAY while

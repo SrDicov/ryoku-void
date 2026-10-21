@@ -125,6 +125,17 @@ prebuilt_for() {
   ryoku-host pkg available "$cand" >/dev/null 2>&1 && printf '%s\n' "$cand"
 }
 
+# turing_userspace: the Turing+ userspace packages actually installed, by their
+# own name. `pacman -Q nvidia-utils` also answers for a legacy branch that only
+# provides the name, so the reply has to match the name asked for.
+turing_userspace() {
+  local p
+  for p in nvidia-utils lib32-nvidia-utils; do
+    [[ $(pacman -Qq "$p" 2>/dev/null) == "$p" ]] && printf '%s\n' "$p"
+  done
+  return 0
+}
+
 if ! has_nvidia; then
   echo "nvidia.sh: no NVIDIA GPU detected, nothing to do."
   exit 0
@@ -210,6 +221,7 @@ else
   for kb in "${kernels[@]}"; do headers+=("${kb}-headers"); done
   multilib=0
   if pacman-conf --repo-list 2>/dev/null | grep -qx multilib; then multilib=1; fi
+  dropped=()
   if nvidia_has_gsp; then
     base=(nvidia-utils libva-nvidia-driver)
     if (( multilib )); then base+=(lib32-nvidia-utils); fi
@@ -227,13 +239,31 @@ else
   elif nvidia_is_kepler; then
     echo "nvidia.sh: Kepler GPU, using the legacy 470xx branch (nvidia-470xx-dkms)."
     pkgs=(nvidia-470xx-dkms libva-nvidia-driver "${headers[@]}")
-    if (( multilib )); then pkgs+=(lib32-nvidia-470xx-utils); fi
+    mapfile -t dropped < <(turing_userspace)
+    if (( multilib )) || [[ " ${dropped[*]} " == *" lib32-nvidia-utils "* ]]; then pkgs+=(lib32-nvidia-470xx-utils); fi
   else
     echo "nvidia.sh: Maxwell, Pascal, or Volta GPU, using the legacy 580xx branch (nvidia-580xx-dkms)."
     pkgs=(nvidia-580xx-dkms libva-nvidia-driver "${headers[@]}")
-    if (( multilib )); then pkgs+=(lib32-nvidia-580xx-utils); fi
+    mapfile -t dropped < <(turing_userspace)
+    if (( multilib )) || [[ " ${dropped[*]} " == *" lib32-nvidia-utils "* ]]; then pkgs+=(lib32-nvidia-580xx-utils); fi
   fi
-  install_pkgs "${pkgs[@]}" || echo "nvidia.sh: WARNING: NVIDIA driver install failed. A Kepler or older card needs the 470xx branch (nvidia-470xx-dkms); a Turing+ card needs a matching kernel/driver. On an offline install the legacy branches are only present if the ISO managed to bake them (they are large vendor blobs, best-effort); nouveau/mesa still brings the desktop up. Install a working driver and run 'mkinitcpio -P' to enable it."
+  # The target already carries the Turing+ userspace: hardware.packages lays it,
+  # and CachyOS's hyprland, steam and proton builds depend on it by name. A
+  # legacy branch's utils conflict with it without replacing it, and pacman
+  # answers that conflict "no" under --noconfirm, so the driver transaction
+  # failed and the card stayed on nouveau. Remove it with -dd: the legacy utils
+  # provide both names, so its dependents are whole again once the branch lands,
+  # and a failed install puts it back.
+  if (( ${#dropped[@]} )); then
+    echo "nvidia.sh: removing ${dropped[*]}, which the legacy branch's utils replace"
+    run "${PRIV[@]}" pacman -Rdd --noconfirm "${dropped[@]}"
+  fi
+  install_pkgs "${pkgs[@]}" || {
+    if (( ${#dropped[@]} )); then
+      install_pkgs "${dropped[@]}" || echo "nvidia.sh: WARNING: could not reinstall ${dropped[*]}; run 'ryoku doctor'."
+    fi
+    echo "nvidia.sh: WARNING: NVIDIA driver install failed. A Kepler or older card needs the 470xx branch (nvidia-470xx-dkms); a Turing+ card needs a matching kernel/driver. On an offline install the legacy branches are only present if the ISO managed to bake them (they are large vendor blobs, best-effort); nouveau/mesa still brings the desktop up. Install a working driver and run 'mkinitcpio -P' to enable it."
+  }
 fi
 
 # early KMS + the boot-race fix. DRM modeset is mandatory for a working
