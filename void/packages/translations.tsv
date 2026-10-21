@@ -78,7 +78,7 @@ hyprgrass	hyprgrass	hyprland	repo=zrepo
 hypridle	swayidle	desktop	
 hyprland	hyprland	hyprland	repo=zrepo
 hyprland-preview-share-picker	hyprland-preview-share-picker	hyprland	repo=zrepo
-hyprpicker	hyprpicker	desktop	
+hyprpicker	-	desktop	Void's hyprpicker links the old hyprutils (libhyprutils.so.10), which the Hyprland lane replaces; the z-repo can serve a rebuilt one.
 hyprpolkitagent	hyprpolkitagent	hyprland	repo=zrepo
 hyprsunset	hyprsunset	hyprland	repo=zrepo
 imagemagick	ImageMagick	desktop	
