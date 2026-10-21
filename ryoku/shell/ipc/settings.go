@@ -45,18 +45,19 @@ import (
 // A patch whose first path segment is one of these is validated; anything else is
 // passthrough.
 var contractKeys = map[string]bool{
-	"deckFrost":     true,
-	"general":       true,
-	"theme":         true,
-	"bars":          true,
-	"menus":         true,
-	"notifications": true,
-	"wallpaper":     true,
-	"ask":           true,
-	"phone":         true,
-	"controls":      true,
-	"batteryAlerts": true,
-	"sounds":        true,
+	"deckFrostEnabled": true,
+	"deckFrost":        true,
+	"general":          true,
+	"theme":            true,
+	"bars":             true,
+	"menus":            true,
+	"notifications":    true,
+	"wallpaper":        true,
+	"ask":              true,
+	"phone":            true,
+	"controls":         true,
+	"batteryAlerts":    true,
+	"sounds":           true,
 }
 
 // Value domains, in the display order of contract 14 section 8. Stored as stable
@@ -118,18 +119,19 @@ var (
 // icon-theme group, custom-CSS file, and app-launcher menu that Ryoku does not
 // consume. Ask and Controls are Ryoku's typed shell state.
 type settings struct {
-	DeckFrost     float64               `json:"deckFrost"`
-	General       generalSettings       `json:"general"`
-	Theme         themeSettings         `json:"theme"`
-	Bars          barsSettings          `json:"bars"`
-	Menus         menusSettings         `json:"menus"`
-	Notifications notificationsSettings `json:"notifications"`
-	Wallpaper     wallpaperSettings     `json:"wallpaper"`
-	Ask           askSettings           `json:"ask"`
-	Phone         phoneSettings         `json:"phone"`
-	Controls      controlsSettings      `json:"controls"`
-	BatteryAlerts batteryAlertsSettings `json:"batteryAlerts"`
-	Sounds        soundsSettings        `json:"sounds"`
+	DeckFrostEnabled bool                  `json:"deckFrostEnabled"`
+	DeckFrost        float64               `json:"deckFrost"`
+	General          generalSettings       `json:"general"`
+	Theme            themeSettings         `json:"theme"`
+	Bars             barsSettings          `json:"bars"`
+	Menus            menusSettings         `json:"menus"`
+	Notifications    notificationsSettings `json:"notifications"`
+	Wallpaper        wallpaperSettings     `json:"wallpaper"`
+	Ask              askSettings           `json:"ask"`
+	Phone            phoneSettings         `json:"phone"`
+	Controls         controlsSettings      `json:"controls"`
+	BatteryAlerts    batteryAlertsSettings `json:"batteryAlerts"`
+	Sounds           soundsSettings        `json:"sounds"`
 }
 
 type generalSettings struct {
@@ -390,7 +392,8 @@ func defaultSettings() *settings {
 		{ID: "bottomControls", Visible: true},
 	}
 	return &settings{
-		DeckFrost: 0.45,
+		DeckFrostEnabled: true,
+		DeckFrost:        0.45,
 		General: generalSettings{
 			ClockFormat24H:       false,
 			WeatherLocationQuery: locationQuery{Type: "Coordinates", Lat: 0, Lon: 0, Name: "", Country: ""},
@@ -915,18 +918,19 @@ func resolveThemePalette(full map[string]any, themeName string) {
 func buildSettings(raw map[string]any, strict bool) (*settings, error) {
 	s := defaultSettings()
 	dst := map[string]any{
-		"deckFrost":     &s.DeckFrost,
-		"general":       &s.General,
-		"theme":         &s.Theme,
-		"bars":          &s.Bars,
-		"menus":         &s.Menus,
-		"notifications": &s.Notifications,
-		"wallpaper":     &s.Wallpaper,
-		"ask":           &s.Ask,
-		"phone":         &s.Phone,
-		"controls":      &s.Controls,
-		"batteryAlerts": &s.BatteryAlerts,
-		"sounds":        &s.Sounds,
+		"deckFrostEnabled": &s.DeckFrostEnabled,
+		"deckFrost":        &s.DeckFrost,
+		"general":          &s.General,
+		"theme":            &s.Theme,
+		"bars":             &s.Bars,
+		"menus":            &s.Menus,
+		"notifications":    &s.Notifications,
+		"wallpaper":        &s.Wallpaper,
+		"ask":              &s.Ask,
+		"phone":            &s.Phone,
+		"controls":         &s.Controls,
+		"batteryAlerts":    &s.BatteryAlerts,
+		"sounds":           &s.Sounds,
 	}
 	for k, ptr := range dst {
 		raw, ok := raw[k]

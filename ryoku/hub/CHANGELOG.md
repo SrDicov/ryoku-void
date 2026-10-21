@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Added
+- **Deck frost has an on/off switch.** Desktop > General gains a Deck frost
+  switch for the blur and dim behind open windows, on Hyprland and niri alike;
+  the strength slider shows only while it is on. The slider now saves too: it
+  was missing from the page's defaults, so Save never wrote it
+  (`quickshell/schema/DesktopPage.js`, `quickshell/Hub.qml`).
 - **Add-ons reads part availability from the actuator.** The bundle card and
   sheet take each part's availability and reason from `ryostore-install
   status` instead of probing every package with `ryoku-host pkg available`,

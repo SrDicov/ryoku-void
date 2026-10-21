@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Added
+- **`deckFrostEnabled` turns the deck frost off.** A validated shell.json bool,
+  default true, that the desktop haze and the bar's matching translucency both
+  obey, so the strength survives switching it off and back on
+  (`ipc/settings.go`, `quickshell/shell/services/Config.qml`,
+  `quickshell/shell/modules/desktop/Desktop.qml`).
 - **The dock can be one installed from RyoStore.** `UniversalDockHost` runs a
   store dock's `Dock.qml` from its installed view as the design of that id,
   with the same screen, visibility and Stage Editor inputs the shipped designs

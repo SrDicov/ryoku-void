@@ -459,7 +459,7 @@ func TestMalformedFileFirstLoad(t *testing.T) {
 			t.Fatalf("first-load fallback carried %d top-level keys, want %d (schema only)", len(s.raw), len(contractKeys))
 		}
 		for _, k := range []string{
-			"deckFrost", "general", "theme", "bars", "menus", "notifications",
+			"deckFrostEnabled", "deckFrost", "general", "theme", "bars", "menus", "notifications",
 			"wallpaper", "ask", "controls", "batteryAlerts",
 		} {
 			if _, ok := s.raw[k]; !ok {
