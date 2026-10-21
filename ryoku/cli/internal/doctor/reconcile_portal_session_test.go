@@ -203,7 +203,7 @@ func TestPortalSessionRunitUsesHostPackageState(t *testing.T) {
 
 	doctorPackageInstalled = func(string) bool { return true }
 	dead := reconcilePortalSession(true)
-	if dead.status != recNote || strings.Contains(dead.remedy, "systemctl") {
-		t.Fatalf("dead runit backend = %s remedy %q, want neutral D-Bus note", dead.status.label(), dead.remedy)
+	if dead.status != recWarn || strings.Contains(dead.remedy, "systemctl") {
+		t.Fatalf("dead runit backend = %s remedy %q, want warn with a neutral D-Bus remedy", dead.status.label(), dead.remedy)
 	}
 }

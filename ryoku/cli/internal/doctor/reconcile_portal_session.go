@@ -148,7 +148,10 @@ func portalBackendFault() recResult {
 			withFix(doctorInstallAdvice(pkgs...))
 	}
 	if initSystem, err := doctorInitSystem(); err == nil && initSystem == host.Runit {
-		return noteRes(i18n.T("screen share offers no source picker: the installed portal backend did not publish its D-Bus interface; log out and back in to restart it"))
+		// runit has no systemd user unit here; the remedy stays neutral, but a
+		// broken screen share is as real on Void as anywhere else.
+		return warnRes(i18n.T("screen share offers no source picker: the installed portal backend did not publish its D-Bus interface")).
+			withFix(i18n.T("log out and back in to restart the portal"))
 	}
 	return warnRes(i18n.T("screen share offers no source picker: the portal backend is installed but never published its interface")).
 		withFix(fmt.Sprintf("ryoku-host svc --user restart xdg-desktop-portal-%s.service", backend))
