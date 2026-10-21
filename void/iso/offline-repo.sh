@@ -96,8 +96,8 @@ if ((${#zrepo_packages[@]})); then
 		-H 'Accept: application/vnd.github+json' \
 		"$ZREPO_RELEASE" > "$assets"
 	[[ -s $assets ]] || die "z-repo release at $ZREPO_RELEASE returned no asset list"
-	for name in "${zrepo_packages[@]}"; do
-		url=$(awk -v pkg="$name" '
+	zrepo_asset_url() {
+		awk -v pkg="$1" '
 			{
 				if (match($0, /"browser_download_url"[[:space:]]*:[[:space:]]*"/)) {
 					start = RSTART + RLENGTH
@@ -105,18 +105,40 @@ if ((${#zrepo_packages[@]})); then
 					url = substr($0, start, quote - start)
 					base = url
 					sub(/.*\//, "", base)
-					if (index(base, pkg "-") == 1 && base ~ /\.xbps$/) {
+					if (base ~ ("^" pkg "-[0-9]") && base ~ /\.xbps$/) {
 						print url
 						exit
 					}
 				}
-			}' "$assets")
+			}' "$assets"
+	}
+
+	# The lane's own packages plus everything they require from the z-repo.
+	# The Void mirror ships older hyprutils and lua55, so the library stack has
+	# to come from the z-repo: otherwise the closure resolves the mirror's
+	# versions, which cannot satisfy what the lane asks for.
+	declare -A zrepo_have=()
+	queue=("${zrepo_packages[@]}")
+	while ((${#queue[@]})); do
+		name=${queue[0]}
+		queue=("${queue[@]:1}")
+		[[ -n ${zrepo_have[$name]:-} ]] && continue
+		url=$(zrepo_asset_url "$name")
 		[[ -n $url ]] || die "z-repo release has no $name package archive"
 		curl -fsSL --retry 3 -o "$zrepo_work/${url##*/}" "$url"
 		curl -fsSL --retry 3 -o "$zrepo_work/${url##*/}.sig2" "$url.sig2"
+		zrepo_have[$name]=1
+		XBPS_TARGET_ARCH=$ARCH xbps-rindex --add "$zrepo_work/${url##*/}" >/dev/null
+		while read -r dep; do
+			[[ -n $dep ]] || continue
+			need=${dep%%[<>=]*}
+			[[ -n $need && $need != "$name" ]] || continue
+			zrepo_asset_url "$need" >/dev/null || continue
+			queue+=("$need")
+		done < <(xbps-query --repository="$zrepo_work" -R -p run_depends "$name" 2>/dev/null)
 	done
 	rm -f "$assets"
-	XBPS_TARGET_ARCH=$ARCH xbps-rindex --add "$zrepo_work"/*.xbps
+	log "Hyprland lane: ${#zrepo_have[@]} packages from the z-repo"
 	repositories+=(-R "$zrepo_work")
 fi
 
