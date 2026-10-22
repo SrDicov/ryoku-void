@@ -5,10 +5,13 @@ exec 2>&1
 BIN=${RYOKU_BIN_DIR:-/usr/bin}
 _status=$1
 
-"$BIN/ryoku-power-cutover" qylock-guards-stop >/dev/null 2>&1 || true
+# Bounded: a lock held by a stuck peer must not freeze the supervisor.
+timeout 20 "$BIN/ryoku-power-cutover" qylock-guards-stop >/dev/null 2>&1 || true
 
 if [ "$_status" -eq -1 ]; then
-	"$BIN/ryoku-qylock-activate" --prepare-stop || true
+	# Bounded: waiting for a locked screen to unlock is not this process's job
+	# and used to hang the supervisor's finish forever.
+	timeout 30 "$BIN/ryoku-qylock-activate" --prepare-stop || true
 fi
 
 exit 1

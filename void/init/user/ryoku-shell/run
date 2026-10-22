@@ -16,9 +16,27 @@ export QT_FFMPEG_DECODING_HW_DEVICE_TYPES=
 
 # Clear a stale daemon that may still own the socket.
 "$BIN/ryoku-shell" quit >/dev/null 2>&1 || true
-"$BIN/ryoku-qylock-activate" || exec sv down .
 
-# Runit has no post-start hook; run these jobs without delaying startup.
+# runit starts this service in parallel with the login cutover, and both take
+# the same qylock locks. Wait for the cutover to finish before racing it into
+# a deadlock; the lock is free when no cutover is running.
+cutover_lock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ryoku-power-cutover.lock"
+if [ -e "$cutover_lock" ]; then
+	exec 9>"$cutover_lock"
+	if command -v flock >/dev/null 2>&1; then
+		flock -w 120 9 || true
+	fi
+	exec 9>&-
+fi
+
+# Bounded: a lock held by a stuck peer must not freeze the supervisor. A
+# failed activation exits non-zero so runsv retries instead of parking the
+# service with a permanent down file.
+timeout 90 "$BIN/ryoku-qylock-activate" || {
+	echo "ryoku-shell: qylock activation failed; letting runsv retry" >&2
+	exit 1
+}
+
 ( "$BIN/ryoku-power-cutover" qylock-guards-stop >/dev/null 2>&1 || true
   "$BIN/ryoku-hub" voxtype ensure >/dev/null 2>&1 || true ) &
 

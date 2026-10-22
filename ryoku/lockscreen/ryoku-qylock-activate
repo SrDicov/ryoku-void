@@ -6,8 +6,19 @@ command -v flock >/dev/null 2>&1 || {
   printf 'ryoku-qylock-activate: flock is required\n' >&2
   exit 1
 }
+lock_timeout="${RYOKU_QYLOCK_LOCK_TIMEOUT:-60}"
+
+# Every wait here is bounded. An unbounded flock on a lock a stuck peer holds
+# freezes the ryoku-shell run script, and the supervisor can never stop it.
+take_lock() {
+  flock -w "$lock_timeout" "$1" && return 0
+  printf 'ryoku-qylock-activate: timed out after %ss waiting for lock fd %s\n' \
+    "$lock_timeout" "$1" >&2
+  return 1
+}
+
 exec 4>"$runtime_dir/ryoku-qylock-mutation.lock"
-flock 4
+take_lock 4 || exit 1
 
 share="$HOME/.local/share"
 stage="$share/ryoku/qylock-next"
@@ -112,6 +123,34 @@ elif [[ -x $HOME/.local/bin/ryoku-power-cutover ]]; then
   power_helper="$HOME/.local/bin/ryoku-power-cutover"
 fi
 
+drain_budget="${RYOKU_QYLOCK_DRAIN_TIMEOUT:-15}"
+
+# A locked screen stays up until a human types the passphrase. Waiting for it
+# without a bound is how a shell restart hangs in the supervisor's finish.
+drain_lock_clients() {
+  local deadline=$((SECONDS + drain_budget))
+  while lock_clients_active; do
+    ((SECONDS < deadline)) || {
+      printf 'ryoku-qylock-activate: lock clients still active after %ss; continuing\n' \
+        "$drain_budget" >&2
+      return 0
+    }
+    sleep 0.2
+  done
+}
+
+drain_until_generation() {
+  local deadline=$((SECONDS + drain_budget))
+  while lock_clients_active &&
+        ! clients_match_generation "$desired_generation" "$proof_for_desired"; do
+    ((SECONDS < deadline)) || {
+      printf 'ryoku-qylock-activate: lock clients did not reach generation %s in %ss; continuing\n' \
+        "${desired_generation:0:12}" "$drain_budget" >&2
+      return 0
+    }
+    sleep 0.2
+  done
+}
 live_generation="$(read_generation "$live_generation_file" || true)"
 stage_generation="$(read_generation "$stage/.generation" || true)"
 expected_generation=""
@@ -151,27 +190,18 @@ if [[ ${1:-} == --prepare-stop ]]; then
         ! -e $stage/.activated ]]; then
     "$power_helper" launch-guard-start
     if ryoku-shell lock-quiesce >/dev/null 2>&1; then
-      while lock_clients_active &&
-            ! clients_match_generation "$desired_generation" "$proof_for_desired"; do
-        sleep 0.2
-      done
+      drain_until_generation
     else
       # Pre-protocol daemons cannot close admission. Drain while their unlock
       # path is alive, then stop them and catch the final legacy launch race.
-      while lock_clients_active; do
-        sleep 0.2
-      done
+      drain_lock_clients
       ryoku-shell quit >/dev/null 2>&1 || true
-      while lock_clients_active; do
-        sleep 0.2
-      done
+      drain_lock_clients
     fi
   else
     "$power_helper" generation-guard-start
     ryoku-shell quit >/dev/null 2>&1 || true
-    while lock_clients_active; do
-      sleep 0.2
-    done
+    drain_lock_clients
   fi
   exit 0
 fi
@@ -194,9 +224,9 @@ elif lock_clients_active; then
   exit 1
 else
   exec 6>"${XDG_RUNTIME_DIR:-/tmp}/ryoku-qylock-launch.lock"
-  flock 6
+  take_lock 6 || exit 1
   exec 5>"${XDG_RUNTIME_DIR:-/tmp}/ryoku-qylock-generation.lock"
-  flock 5
+  take_lock 5 || exit 1
   inline_generation_guard=1
 fi
 if lock_clients_active &&

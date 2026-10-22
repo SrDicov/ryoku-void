@@ -383,9 +383,13 @@ ensure_qylock_generation_guard() {
 }
 
 with_qylock_mutation_guard() {
-  local mutation_fd rc=0
+  local mutation_fd rc=0 timeout="${RYOKU_QYLOCK_LOCK_TIMEOUT:-60}"
   exec {mutation_fd}>"$qylock_mutation_lock"
-  flock "$mutation_fd"
+  if ! flock -w "$timeout" "$mutation_fd"; then
+    exec {mutation_fd}>&-
+    log "timed out after ${timeout}s waiting for $qylock_mutation_lock" >&2
+    return 1
+  fi
   "$@" || rc=$?
   flock -u "$mutation_fd"
   exec {mutation_fd}>&-
@@ -494,10 +498,16 @@ qylock_client_active() {
 }
 
 wait_lock_clients() {
+  local budget="${RYOKU_QYLOCK_DRAIN_TIMEOUT:-15}"
+  local deadline=$((SECONDS + budget))
   if qylock_client_active; then
     log "waiting for the active lock generation to unlock"
   fi
   while qylock_client_active; do
+    ((SECONDS < deadline)) || {
+      log "lock clients still active after ${budget}s; continuing" >&2
+      return 0
+    }
     sleep 0.2
   done
 }
