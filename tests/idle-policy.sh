@@ -254,7 +254,7 @@ exec sleep 60
 EOF
 chmod +x "$sway_bin/swayidle"
 export RYOKU_IDLE_SWAY_PID="$tmp/swayidle.pid"
-export RYOKU_IDLE_TEST_POLICY='{"enabled":true,"onDesktops":false,"battery":{"lockSec":30},"ac":{"lockSec":120}}'
+export RYOKU_IDLE_TEST_POLICY='{"enabled":true,"onDesktops":true,"battery":{"lockSec":30},"ac":{"lockSec":120}}'
 PATH="$sway_bin" "$helper" apply
 if kill -0 "$idle_pid" 2>/dev/null; then
   printf 'apply returned while the old swayidle process was still alive\n' >&2
