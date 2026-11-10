@@ -4,6 +4,7 @@ source "$startdir/hyprland-plugin.sh"
 _repo="$startdir/../../../.."
 
 build() {
+  rm -rf "$srcdir/imgborders"
   cp -a "$_repo/.rpm-imgborders/imgborders" "$srcdir/"
   cmake -S "$srcdir/imgborders" -B "$srcdir/imgborders/build" \
     -DCMAKE_BUILD_TYPE=Release

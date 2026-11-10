@@ -23,6 +23,14 @@ def fail(message):
     raise SystemExit(1)
 
 
+def warn(message):
+    print(f"ryoku-refresh-pins: warning: {message}", file=sys.stderr)
+
+
+class FetchError(Exception):
+    pass
+
+
 def split_field(value):
     return [] if value in ("", "-") else value.split(";")
 
@@ -66,25 +74,28 @@ class Client:
         self.cache = {}
         self.token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
 
-    def get(self, url, accept="application/vnd.github+json"):
+    def get(self, url, accept="application/vnd.github+json", retries=3):
         if url in self.cache:
             return self.cache[url]
         headers = {"Accept": accept, "User-Agent": "ryoku-pin-refresh"}
         if self.token and "api.github.com" in url:
             headers["Authorization"] = f"Bearer {self.token}"
-        try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=45) as response:
-                data = response.read()
-        except (OSError, urllib.error.HTTPError) as error:
-            fail(f"could not fetch {url}: {error}")
-        self.cache[url] = data
-        return data
+        last_error = None
+        for attempt in range(retries):
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=45) as response:
+                    data = response.read()
+                self.cache[url] = data
+                return data
+            except (OSError, urllib.error.HTTPError) as error:
+                last_error = error
+        raise FetchError(f"could not fetch {url}: {last_error}")
 
     def json(self, url):
         try:
             return json.loads(self.get(url))
         except (ValueError, TypeError) as error:
-            fail(f"could not parse JSON from {url}: {error}")
+            raise FetchError(f"could not parse JSON from {url}: {error}")
 
     def ls_remote(self, url, *refs):
         command = ["git", "ls-remote"]
@@ -425,9 +436,15 @@ def main():
             fail(f"package {selected} is not in {manifest}")
     client = Client()
     pending = []
+    unresolved = []
     for row in rows:
-        latest, tag, link = client.latest(row)
-        drift = has_drift(root, row)
+        try:
+            latest, tag, link = client.latest(row)
+            drift = has_drift(root, row)
+        except FetchError as error:
+            warn(f"{row['package']}: keeping current pin; {error}")
+            unresolved.append((row["package"], row["current"], row["current"], row.get("upstream", ""), str(error)))
+            continue
         newer = row["source"] == "github-commit" and latest != row["current"]
         if row["source"] != "github-commit":
             newer = version_key(latest) > version_key(row["current"])
@@ -439,63 +456,70 @@ def main():
         print(f"{status}\t{row['package']}\t{row['current']}\t{latest}\t{link}")
         pending.append((row, latest, tag, link, blocked, drift))
     if mode == "--check":
-        if not pending:
+        if not pending and not unresolved:
             print("all-current")
         raise SystemExit(EXIT_BUMPS if pending else 0)
 
     changes = {manifest: manifest.read_text()}
     completed = []
+    skipped = []
     for row, latest, tag, link, blocked, drift in pending:
         if blocked:
             continue
-        commit = ""
-        if split_field(row["commit_fields"]):
-            commit = client.tag_commit(row, tag)
-        rpm_version = format_version(latest, row["rpm_format"])
-        void_version = format_version(latest, row["void_format"])
-        for relative in split_field(row["pin_files"]):
-            path = root / relative
-            text = changes.get(path, path.read_text())
-            if relative.endswith(".spec"):
-                text = replace_package_version(text, relative, rpm_version)
-            elif relative.endswith("/template"):
-                text = replace_package_version(text, relative, void_version)
-            changes[path] = text
-        for descriptor in split_field(row["ref_fields"]):
-            relative, field = descriptor.split("#", 1)
-            path = root / relative
-            changes[path] = replace_field(changes.get(path, path.read_text()), relative, field, latest)
-        for descriptor in split_field(row["commit_fields"]):
-            relative, field = descriptor.split("#", 1)
-            path = root / relative
-            changes[path] = replace_field(changes.get(path, path.read_text()), relative, field, commit)
-
-        values = {"version": latest, "tag": tag, "commit": commit or latest,
-                  "rpm_version": rpm_version or latest}
-        extras_file = next((item for item in split_field(row["pin_files"]) if item.endswith("ryoku-install-extra")), "")
-        extra_version = format_version(latest, row["extra_format"])
-        for key, pattern in extra_patterns(row).items():
-            if not extras_file or extra_version is None:
-                fail(f"{row['package']}: incomplete extras pin description")
-            path = root / extras_file
-            url = render(pattern, values)
-            changes[path] = update_extra(client, changes.get(path, path.read_text()), extras_file, key, extra_version, url)
-
-        for relative in split_field(row["pin_files"]):
-            if "/sources/" in relative:
+        try:
+            pkg_changes = dict(changes)
+            commit = ""
+            if split_field(row["commit_fields"]):
+                commit = client.tag_commit(row, tag)
+            rpm_version = format_version(latest, row["rpm_format"])
+            void_version = format_version(latest, row["void_format"])
+            for relative in split_field(row["pin_files"]):
                 path = root / relative
-                spec_path = path.parent.parent / f"{path.name}.spec"
-                spec_text = changes.get(spec_path, spec_path.read_text())
-                changes[path] = refresh_rpm_sources(client, spec_text, changes.get(path, path.read_text()), relative)
-            elif relative.endswith("/template") and re.search(r"^checksum=(?!SKIP)", changes[root / relative], re.M):
+                text = pkg_changes.get(path, path.read_text())
+                if relative.endswith(".spec"):
+                    text = replace_package_version(text, relative, rpm_version)
+                elif relative.endswith("/template"):
+                    text = replace_package_version(text, relative, void_version)
+                pkg_changes[path] = text
+            for descriptor in split_field(row["ref_fields"]):
+                relative, field = descriptor.split("#", 1)
                 path = root / relative
-                changes[path] = refresh_void_checksums(client, changes[path], relative)
+                pkg_changes[path] = replace_field(pkg_changes.get(path, path.read_text()), relative, field, latest)
+            for descriptor in split_field(row["commit_fields"]):
+                relative, field = descriptor.split("#", 1)
+                path = root / relative
+                pkg_changes[path] = replace_field(pkg_changes.get(path, path.read_text()), relative, field, commit)
 
-        manifest_pattern = rf"^({re.escape(row['package'])}\t(?:[^\t]*\t){{2}}){re.escape(row['current'])}(\t)"
-        changes[manifest], count = re.subn(manifest_pattern, rf"\g<1>{latest}\g<2>", changes[manifest], count=1, flags=re.M)
-        if count != 1:
-            fail(f"could not update {row['package']} in {manifest}")
-        completed.append((row["package"], row["current"], latest, link, drift))
+            values = {"version": latest, "tag": tag, "commit": commit or latest,
+                      "rpm_version": rpm_version or latest}
+            extras_file = next((item for item in split_field(row["pin_files"]) if item.endswith("ryoku-install-extra")), "")
+            extra_version = format_version(latest, row["extra_format"])
+            for key, pattern in extra_patterns(row).items():
+                if not extras_file or extra_version is None:
+                    fail(f"{row['package']}: incomplete extras pin description")
+                path = root / extras_file
+                url = render(pattern, values)
+                pkg_changes[path] = update_extra(client, pkg_changes.get(path, path.read_text()), extras_file, key, extra_version, url)
+
+            for relative in split_field(row["pin_files"]):
+                if "/sources/" in relative:
+                    path = root / relative
+                    spec_path = path.parent.parent / f"{path.name}.spec"
+                    spec_text = pkg_changes.get(spec_path, spec_path.read_text())
+                    pkg_changes[path] = refresh_rpm_sources(client, spec_text, pkg_changes.get(path, path.read_text()), relative)
+                elif relative.endswith("/template") and re.search(r"^checksum=(?!SKIP)", pkg_changes[root / relative], re.M):
+                    path = root / relative
+                    pkg_changes[path] = refresh_void_checksums(client, pkg_changes[path], relative)
+
+            manifest_pattern = rf"^({re.escape(row['package'])}\t(?:[^\t]*\t){{2}}){re.escape(row['current'])}(\t)"
+            pkg_changes[manifest], count = re.subn(manifest_pattern, rf"\g<1>{latest}\g<2>", pkg_changes[manifest], count=1, flags=re.M)
+            if count != 1:
+                fail(f"could not update {row['package']} in {manifest}")
+            changes = pkg_changes
+            completed.append((row["package"], row["current"], latest, link, drift))
+        except FetchError as error:
+            warn(f"{row['package']}: keeping previous pin/checksum; unverifiable source: {error}")
+            skipped.append((row["package"], row["current"], latest, link, str(error)))
 
     for path, text in changes.items():
         if path.read_text() == text:
@@ -514,6 +538,19 @@ def main():
             lines.extend(["", "Major updates need an explicit manifest opt-in:"])
             for row, latest, _, link, _, _ in blocked_rows:
                 lines.append(f"- [{row['package']}]({link}): {row['current']} to {latest}")
+        if skipped or unresolved:
+            lines.extend(["", "Kept previous pins/checksums because upstream sources could not be verified:"])
+            for package, old, new, link, reason in skipped:
+                target = link or package
+                if link:
+                    lines.append(f"- [{package}]({link}): kept {old} (candidate {new}); {reason}")
+                else:
+                    lines.append(f"- {package}: kept {old} (candidate {new}); {reason}")
+            for package, old, new, link, reason in unresolved:
+                if link:
+                    lines.append(f"- [{package}]({link}): kept {old}; {reason}")
+                else:
+                    lines.append(f"- {package}: kept {old}; {reason}")
         lines.extend(["", "Package builds run after this pull request lands on `unstable-dev`.", ""])
         report_path.write_text("\n".join(lines))
     print(f"wrote\t{len(completed)}\tpackage pin set(s)")
