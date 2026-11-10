@@ -263,10 +263,14 @@ fi
 wait "$idle_pid" 2>/dev/null || true
 rm -f "$tmp/proc/$idle_pid"
 idle_pid=""
-for _ in {1..50}; do
+for _ in {1..200}; do
   [[ -r $RYOKU_IDLE_SWAY_PID ]] && break
   sleep 0.01
 done
+if [[ ! -r $RYOKU_IDLE_SWAY_PID ]]; then
+  printf 'apply did not start a replacement swayidle process\n' >&2
+  exit 1
+fi
 replacement_pid="$(<"$RYOKU_IDLE_SWAY_PID")"
 kill -0 "$replacement_pid"
 kill "$replacement_pid"
