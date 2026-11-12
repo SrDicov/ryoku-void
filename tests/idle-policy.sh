@@ -78,7 +78,7 @@ fi
 sway_bin="$tmp/sway-bin"
 sway_log="$tmp/swayidle.argv"
 mkdir -p "$sway_bin"
-for tool in bash dirname id jq mkdir mktemp mv; do
+for tool in bash dirname id jq mkdir mktemp mv python3; do
   ln -s "$(command -v "$tool")" "$sway_bin/$tool"
 done
 ln -s "$bin/ryoku-power" "$sway_bin/ryoku-power"
@@ -222,13 +222,19 @@ fi
 
 # `apply` is an update safety gate: a running daemon with the old generated
 # hooks must actually be gone before it reports success.
-cp /usr/bin/sleep "$bin/hypridle"
-"$bin/hypridle" 60 &
+ln -sf "$(command -v sleep)" "$bin/hypridle"
+exec -a sleep "$bin/hypridle" 60 &
 idle_pid=$!
 ln -s "/proc/$idle_pid" "$tmp/proc/$idle_pid"
 export RYOKU_IDLE_TEST_POLICY='{"enabled":false,"onDesktops":false}'
 "$helper" apply
-if kill -0 "$idle_pid" 2>/dev/null; then
+for _ in {1..20}; do
+  if ! kill -0 "$idle_pid" 2>/dev/null || grep -q '^State:[[:space:]]*Z' "/proc/$idle_pid/status" 2>/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+if kill -0 "$idle_pid" 2>/dev/null && ! grep -q '^State:[[:space:]]*Z' "/proc/$idle_pid/status" 2>/dev/null; then
   printf 'apply returned while the pre-upgrade hypridle was still alive\n' >&2
   exit 1
 fi
@@ -241,8 +247,8 @@ idle_pid=""
 rm -f "$sway_bin/hypridle"
 ln -s "$(command -v setsid)" "$sway_bin/setsid"
 ln -s "$(command -v sleep)" "$sway_bin/sleep"
-cp /usr/bin/sleep "$sway_bin/swayidle"
-PATH="$sway_bin" "$sway_bin/swayidle" 60 &
+ln -sf "$(command -v sleep)" "$sway_bin/swayidle"
+PATH="$sway_bin" exec -a sleep "$sway_bin/swayidle" 60 &
 idle_pid=$!
 ln -s "/proc/$idle_pid" "$tmp/proc/$idle_pid"
 rm -f "$sway_bin/swayidle"
@@ -256,7 +262,13 @@ chmod +x "$sway_bin/swayidle"
 export RYOKU_IDLE_SWAY_PID="$tmp/swayidle.pid"
 export RYOKU_IDLE_TEST_POLICY='{"enabled":true,"onDesktops":true,"battery":{"lockSec":30},"ac":{"lockSec":120}}'
 PATH="$sway_bin" "$helper" apply
-if kill -0 "$idle_pid" 2>/dev/null; then
+for _ in {1..20}; do
+  if ! kill -0 "$idle_pid" 2>/dev/null || grep -q '^State:[[:space:]]*Z' "/proc/$idle_pid/status" 2>/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+if kill -0 "$idle_pid" 2>/dev/null && ! grep -q '^State:[[:space:]]*Z' "/proc/$idle_pid/status" 2>/dev/null; then
   printf 'apply returned while the old swayidle process was still alive\n' >&2
   exit 1
 fi

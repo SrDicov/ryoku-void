@@ -99,15 +99,16 @@ jobs:
               --json databaseId -q '.[0].databaseId') || rid=""
           fi
 
-          # On the weekly schedule the newest successful Build ISO can predate
-          # the 14-day artifact retention window, leaving nothing to download.
-          # That is not a failure: warn and skip cleanly, the same way the VM
-          # step skips a runner with no /dev/kvm. A missing artifact on a
-          # workflow_run or manual dispatch is still a real error.
+          # On the weekly schedule or manual workflow_dispatch, the newest
+          # successful Build ISO can predate the 14-day artifact retention window
+          # or not exist yet, leaving nothing to download. That is not a failure:
+          # warn and skip cleanly, the same way the VM step skips a runner with no
+          # /dev/kvm. A missing artifact on a workflow_run triggered by Build ISO
+          # is still a real error.
           if [ -n "$rid" ] && gh run download "$rid" -n ryoku-iso --dir iso; then
             echo "iso_ready=true" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "schedule" ]; then
-            echo "::warning::no downloadable Build ISO artifact within the 14-day retention window; skipping the scheduled install test"
+          elif [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "::warning::no downloadable Build ISO artifact found; skipping the VM install test"
             echo "iso_ready=false" >> "$GITHUB_OUTPUT"
           else
             echo "::error::no successful Build ISO run or artifact to test"

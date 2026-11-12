@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -89,6 +90,8 @@ class Client:
                 return data
             except (OSError, urllib.error.HTTPError) as error:
                 last_error = error
+                if attempt + 1 < retries:
+                    time.sleep(2 ** attempt)
         raise FetchError(f"could not fetch {url}: {last_error}")
 
     def json(self, url):
@@ -97,18 +100,23 @@ class Client:
         except (ValueError, TypeError) as error:
             raise FetchError(f"could not parse JSON from {url}: {error}")
 
-    def ls_remote(self, url, *refs):
+    def ls_remote(self, url, *refs, retries=3):
         command = ["git", "ls-remote"]
         if not refs:
             command.extend(["--tags", "--refs"])
         command.append(url)
         command.extend(refs)
-        try:
-            output = subprocess.check_output(
-                command, text=True, stderr=subprocess.STDOUT, timeout=60)
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-            fail(f"could not read refs from {url}: {error}")
-        return [line.split(None, 1) for line in output.splitlines() if "\t" in line]
+        last_error = None
+        for attempt in range(retries):
+            try:
+                output = subprocess.check_output(
+                    command, text=True, stderr=subprocess.STDOUT, timeout=60)
+                return [line.split(None, 1) for line in output.splitlines() if "\t" in line]
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                last_error = error
+                if attempt + 1 < retries:
+                    time.sleep(2 ** attempt)
+        raise FetchError(f"could not read refs from {url}: {last_error}")
 
     def github_tags(self, repo):
         rows = self.ls_remote(f"https://github.com/{repo}.git")
@@ -128,17 +136,17 @@ class Client:
             except urllib.error.HTTPError as error:
                 if error.code == 404:
                     return row["current"], row["current"], f"https://github.com/{upstream}/releases"
-                fail(f"{row['package']}: could not resolve the latest GitHub release: {error}")
+                raise FetchError(f"{row['package']}: could not resolve the latest GitHub release: {error}")
             except OSError as error:
-                fail(f"{row['package']}: could not resolve the latest GitHub release: {error}")
+                raise FetchError(f"{row['package']}: could not resolve the latest GitHub release: {error}")
             marker = "/releases/tag/"
             if marker not in final_url:
                 if final_url.rstrip("/") == f"https://github.com/{upstream}/releases":
                     return row["current"], row["current"], final_url
-                fail(f"{row['package']}: latest GitHub release did not resolve to a tag")
+                raise FetchError(f"{row['package']}: latest GitHub release did not resolve to a tag")
             tag = urllib.parse.unquote(final_url.split(marker, 1)[1].rstrip("/"))
             if PRE_RELEASE.search(canonical(tag)):
-                fail(f"{row['package']}: latest GitHub release is a prerelease")
+                raise FetchError(f"{row['package']}: latest GitHub release is a prerelease")
             return canonical(tag), tag, final_url
         if source == "github-tags":
             candidates = [(tag, sha) for tag, sha in self.github_tags(upstream)
@@ -159,12 +167,12 @@ class Client:
             data = self.json(f"https://pypi.org/pypi/{upstream}/json")
             value = data.get("info", {}).get("version", "")
             if not value or PRE_RELEASE.search(value):
-                fail(f"{row['package']}: PyPI did not return a stable version")
+                raise FetchError(f"{row['package']}: PyPI did not return a stable version")
             return value, value, f"https://pypi.org/project/{upstream}/{value}/"
         if source == "github-commit":
             rows = self.ls_remote(f"https://github.com/{upstream}.git", "HEAD")
             if not rows:
-                fail(f"{row['package']}: GitHub did not return a default-branch commit")
+                raise FetchError(f"{row['package']}: GitHub did not return a default-branch commit")
             commit = rows[0][0]
             return commit, commit, f"https://github.com/{upstream}/commit/{commit}"
         fail(f"{row['package']}: unknown source {source}")
@@ -177,7 +185,7 @@ class Client:
             upstream = f"https://github.com/{upstream}.git"
         rows = self.ls_remote(upstream, f"refs/tags/{tag}^{{}}", f"refs/tags/{tag}")
         if not rows:
-            fail(f"{row['package']}: tag {tag} has no commit")
+            raise FetchError(f"{row['package']}: tag {tag} has no commit")
         peeled = next((sha for sha, ref in rows if ref.endswith("^{}")), "")
         return peeled or rows[0][0]
 
